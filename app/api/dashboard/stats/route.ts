@@ -5,6 +5,8 @@ import Item from "@/models/Item";
 import Customer from "@/models/Customer";
 import Supplier from "@/models/Supplier";
 import Expense from "@/models/Expense";
+import PurchaseEntry from "@/models/PurchaseEntry";
+import PurchaseOrder from "@/models/PurchaseOrder";
 import PaymentTransaction from "@/models/PaymentTransaction";
 import FinanceTransaction from "@/models/FinanceTransaction";
 import { resolveInvoicePayments, classifyPaymentMode } from "@/lib/payment-modes";
@@ -18,7 +20,7 @@ export async function GET(request: Request) {
     const endDateParam = searchParams.get("endDate");
     const warehouseParam = searchParams.get("warehouse") || searchParams.get("location") || "";
 
-    const [allInvoicesRaw, allCustomersRaw, allItemsRaw, allSuppliersRaw, allExpensesRaw, allPaymentsRaw, allFinanceTxnsRaw] = await Promise.all([
+    const [allInvoicesRaw, allCustomersRaw, allItemsRaw, allSuppliersRaw, allExpensesRaw, allPaymentsRaw, allFinanceTxnsRaw, allPurchaseEntriesRaw, allPurchaseOrdersRaw] = await Promise.all([
       Invoice.find({}).sort({ createdAt: -1 }).lean(),
       Customer.find({}).sort({ createdAt: -1 }).lean(),
       Item.find({}).sort({ createdAt: -1 }).lean(),
@@ -26,6 +28,8 @@ export async function GET(request: Request) {
       Expense.find({}).sort({ createdAt: -1 }).lean(),
       PaymentTransaction.find({}).sort({ createdAt: -1 }).lean(),
       FinanceTransaction.find({}, { invoiceNumber: 1, approvalStatus: 1 }).lean(),
+      PurchaseEntry.find({ type: { $ne: "debit-note" }, status: { $ne: "cancelled" } }).sort({ createdAt: -1 }).lean(),
+      PurchaseOrder.find({}).sort({ createdAt: -1 }).lean(),
     ]);
 
     let allInvoices = allInvoicesRaw;
@@ -127,6 +131,27 @@ export async function GET(request: Request) {
       // Fallback to current month if no dates provided
       filteredInvoices = allInvoices.filter((inv: any) => new Date(inv.date || inv.createdAt) >= startOfMonth);
     }
+
+    // Purchases in the same active window, for the Average Purchase KPI — the
+    // purchase-side counterpart to Average Order Value. Counts every Purchase
+    // Entry (a received bill, whether or not it started from a PO) plus every
+    // Purchase Order NOT YET turned into an entry (status !== "received") —
+    // once a PO is fulfilled by an entry, only the entry counts, so a
+    // PO-then-bill purchase isn't added twice.
+    const filteredPurchaseEntries = allPurchaseEntriesRaw.filter((p: any) => {
+      const d = new Date(p.billDate || p.date || p.createdAt);
+      return d >= rangeStart && d <= rangeEnd;
+    });
+    const filteredUnfulfilledPurchaseOrders = allPurchaseOrdersRaw.filter((po: any) => {
+      if (po.status === "received") return false;
+      const d = new Date(po.date || po.createdAt);
+      return d >= rangeStart && d <= rangeEnd;
+    });
+    const totalPurchaseAmount =
+      filteredPurchaseEntries.reduce((sum: number, p: any) => sum + (Number(p.total) || 0), 0) +
+      filteredUnfulfilledPurchaseOrders.reduce((sum: number, po: any) => sum + (Number(po.totalAmount) || 0), 0);
+    const totalPurchaseBills = filteredPurchaseEntries.length + filteredUnfulfilledPurchaseOrders.length;
+    const avgPurchaseValue = totalPurchaseBills > 0 ? totalPurchaseAmount / totalPurchaseBills : 0;
 
     // Payments recorded via "Receive Payment" are stored separately from invoices,
     // so they're matched to the active range by their own transaction date.
@@ -1165,6 +1190,11 @@ export async function GET(request: Request) {
         totalExpenses,
         netProfit: (totalRevenue || 0) - totalExpenses,
         totalOrders: filteredInvoices.length || 0,
+        // Purchase-side counterpart to Average Order Value: what a typical
+        // supplier bill costs in this window, and how many were recorded.
+        totalPurchaseAmount,
+        totalPurchaseBills,
+        avgPurchaseValue,
         pendingOrders: allInvoices.filter((i: any) => i.status === "pending").length || 0,
         lowStockItems: allItems.filter((it: any) => Number(it.currentStock) <= (Number(it.reorderLevel) + 5)).length || 0,
         customersCount: allCustomers.length || 0,

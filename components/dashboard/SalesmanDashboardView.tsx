@@ -221,7 +221,7 @@ export function SalesmanDashboardView({ session }: { session: any }) {
       {tasks.some((t: any) => t.taskType === "sales_target" && t.status !== "Completed") && (
         <div className="bg-gradient-to-r from-purple-900/40 via-purple-950/20 to-transparent border-l-4 border-purple-500 p-3 rounded-xl bg-white shadow-xs border border-purple-100 flex flex-col md:flex-row md:items-center justify-between gap-3">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-purple-100 text-purple-700 flex items-center justify-center shrink-0">
+            <div className="w-7 h-7 rounded-lg bg-purple-100 text-purple-700 flex items-center justify-center shrink-0">
               <Target className="w-5 h-5 animate-pulse" />
             </div>
             <div>

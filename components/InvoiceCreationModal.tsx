@@ -159,7 +159,10 @@ export function InvoiceCreationModal({
   const INITIAL_BILLING_FORM = {
     invoiceNo: "",
     invoiceDate: new Date().toISOString().split("T")[0],
-    dueDate: new Date(Date.now() + 7 * 86400000).toISOString().split("T")[0],
+    // Defaults to today, not some days-out guess — the picker still lets it be
+    // moved up to 7 days ahead, but an untouched field should mean "due now",
+    // not silently promise a week's grace the customer never actually asked for.
+    dueDate: new Date().toISOString().split("T")[0],
     customerId: "",
     customerName: "",
     customerPhone: "",
@@ -925,6 +928,14 @@ export function InvoiceCreationModal({
         queryClient.invalidateQueries({ queryKey: ["items"] });
         queryClient.invalidateQueries({ queryKey: ["serialNumbers"] });
         queryClient.invalidateQueries({ queryKey: ["reports"] });
+        // The dashboard's Due Collections widget loads invoices with a plain
+        // fetch on mount, not react-query, so invalidateQueries above never
+        // reaches it — a bill created here (or its due settled) stayed
+        // invisible there until a full page reload. This event is what its
+        // "erp-invoice-created" listener refreshes on.
+        if (typeof window !== "undefined") {
+          window.dispatchEvent(new CustomEvent("erp-invoice-created", { detail: result.data }));
+        }
         setGeneratedInvoiceToPrint(result.data);
         onSuccess && onSuccess();
       }
@@ -1141,7 +1152,7 @@ export function InvoiceCreationModal({
       salesperson: isIndividualStaff ? currentUserName : (billingForm.salesExecutive || currentUserName),
       createdBy: currentUserName,
       date: billingForm.invoiceDate,
-      dueDate: billingForm.dueDate || new Date(Date.now() + 7 * 86400000).toISOString().split("T")[0],
+      dueDate: billingForm.dueDate || new Date().toISOString().split("T")[0],
       customerName: billingForm.customerName,
       customerPhone: billingForm.customerPhone,
       customerAltPhone: billingForm.customerAltPhone || "",

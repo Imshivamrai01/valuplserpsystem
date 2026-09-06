@@ -218,11 +218,15 @@ export default function StockTransferPage() {
     items: [{ itemId: "", itemName: "", quantity: 1, unit: "PCS", hsn: "", currentStock: 0 }],
   });
 
-  const { data: items = [] } = useQuery({ 
-    queryKey: ["items", formData.fromWarehouse], 
+  // Loads the full catalog rather than filtering by `fromWarehouse` server-side —
+  // /api/items' warehouse param only matches a few hardcoded name patterns, and
+  // most stored `Item.warehouse` values don't match any real branch/godown name
+  // in this system, so that filter was silently returning zero items for most
+  // source warehouses and making the search box always say "not found".
+  const { data: items = [] } = useQuery({
+    queryKey: ["items"],
     queryFn: async () => {
-      const whParam = formData.fromWarehouse ? `?warehouse=${encodeURIComponent(formData.fromWarehouse)}` : "";
-      const res = await fetch(`/api/items${whParam}`);
+      const res = await fetch("/api/items");
       const json = await res.json();
       return json.success ? json.data : [];
     }

@@ -9,7 +9,52 @@ import StockRequest from "@/models/StockRequest";
 import SerialNumber from "@/models/SerialNumber";
 import DeletedPurchaseEntry from "@/models/DeletedPurchaseEntry";
 import AuditLog from "@/models/AuditLog";
+import StaffTask from "@/models/StaffTask";
 import { authoriseDestructiveAction } from "@/lib/destructiveAction";
+
+/**
+ * A bill entered without a linked PO (a direct/walk-in purchase) had no
+ * record on the Purchase Order side at all — so the two screens drifted:
+ * a real purchase existed only in Entries, never in Orders. Mirroring it
+ * here as an already-"received" PO keeps both lists complete regardless
+ * of which screen someone started from.
+ */
+async function mirrorEntryAsPurchaseOrder(entry: any) {
+  try {
+    const count = await PurchaseOrder.countDocuments();
+    const poNo = `PO-${new Date().getFullYear()}-${String(count + 1).padStart(4, "0")}-E`;
+    await PurchaseOrder.create({
+      poNo,
+      supplierName: entry.supplierName,
+      date: entry.billDate,
+      totalAmount: entry.total,
+      subtotal: entry.subtotal,
+      gst: entry.gst,
+      status: "received",
+      items: (entry.items || []).map((it: any) => ({
+        itemId: it.itemId,
+        name: it.name,
+        quantity: it.quantity,
+        rate: it.rate,
+        gstRate: it.gstRate,
+      })),
+    });
+  } catch (err) {
+    console.warn("Notice: mirroring direct entry as purchase order:", err);
+  }
+}
+
+/** Closes the "record an entry for this PO" reminder once that entry exists. */
+async function completeEntryReminderTask(poNo: string) {
+  try {
+    await StaffTask.updateMany(
+      { taskTitle: `Record Purchase Entry for PO ${poNo}`, status: { $ne: "Completed" } },
+      { $set: { status: "Completed", completedAt: new Date(), completionRemarks: "Purchase Entry recorded." } }
+    );
+  } catch (err) {
+    console.warn("Notice: completing purchase entry reminder task:", err);
+  }
+}
 
 export async function GET(req: Request) {
   try {
@@ -225,12 +270,17 @@ export async function POST(req: Request) {
       }
     }
 
-    // Update Linked Purchase Order Status
+    // Update Linked Purchase Order Status, and close its "record an entry" reminder
     if (body.linkedPoNo) {
       await PurchaseOrder.findOneAndUpdate(
         { poNo: body.linkedPoNo },
         { status: "received" }
       );
+      await completeEntryReminderTask(body.linkedPoNo);
+    } else if (body.type !== "debit-note") {
+      // Direct entry with no PO behind it — mirror it as an already-received
+      // Purchase Order so it shows up on that screen too.
+      await mirrorEntryAsPurchaseOrder(entry);
     }
 
     return NextResponse.json({ success: true, data: entry });

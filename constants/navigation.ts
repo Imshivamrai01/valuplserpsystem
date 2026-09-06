@@ -86,7 +86,6 @@ export const NAV_GROUPS: NavGroup[] = [
       { title: "Stock Flow (In/Out)", href: "/inventory/stock-flow", icon: ArrowLeftRight, roles: ["admin", "warehouse"] },
       { title: "Stock Transfer (Inter-Godown)", href: "/inventory/transfer", icon: ArrowLeftRight, roles: ["admin", "warehouse"] },
       { title: "Daily Physical Audit", href: "/inventory/audit", icon: ClipboardCheck, roles: ["admin", "warehouse"] },
-      { title: "Stock Discrepancy", href: "/inventory/discrepancies", icon: AlertTriangle, roles: ["admin", "warehouse"] },
       { title: "Order Dispatch & Deliveries", href: "/sales/dispatch", icon: Truck, roles: ["admin", "warehouse", "manager"] },
       { title: "Delivery Challan", href: "/sales/challan", icon: PackageCheck, roles: ["admin", "warehouse"] },
       { title: "E-Way Bills", href: "/sales/eway-bill", icon: Truck, roles: ["admin", "warehouse"] },

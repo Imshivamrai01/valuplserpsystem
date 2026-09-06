@@ -49,6 +49,12 @@ export function PurchaseCreationModal({ isOpen, onClose, mode = "entry", preload
 
   const [currentMode, setCurrentMode] = useState<"entry" | "debit-note" | "order">(mode);
   const [createdBillToPrint, setCreatedBillToPrint] = useState<any | null>(null);
+  // "" means untouched — defaults to fully paid (the old, only behaviour) so
+  // nobody who never looks at this field sees anything change. Editing it
+  // down is what lets a bill be recorded as unpaid/partially paid instead of
+  // the supplier balance silently always reading zero.
+  const [amountPaidNow, setAmountPaidNow] = useState<string>("");
+  const [purchaseDueDate, setPurchaseDueDate] = useState<string>("");
 
   const { data: dbWarehouses = EMPTY_ARRAY } = useQuery({
     queryKey: ["warehouses"],
@@ -112,6 +118,8 @@ export function PurchaseCreationModal({ isOpen, onClose, mode = "entry", preload
   useEffect(() => {
     if (isOpen && !prevIsOpenRef.current) {
       setCurrentMode(mode);
+      setAmountPaidNow("");
+      setPurchaseDueDate("");
       const defaultWh = userAssignedBranch || "Ashoka Enterprises (Kunraghat Showroom)";
 
       if (preloadedItem || (preloadedItems && preloadedItems.length > 0)) {
@@ -130,7 +138,15 @@ export function PurchaseCreationModal({ isOpen, onClose, mode = "entry", preload
           billDate: new Date().toISOString().split("T")[0],
           warehouse: defaultWh,
           supplierName: supplierName,
-          supplierPhone: matchedSupplier?.phone || "9876543210",
+          // Left blank (not a shared placeholder number) when no real supplier
+          // matched. A hardcoded fallback phone here meant every unmatched
+          // brand's auto-create lookup (which checks phone before name) found
+          // the FIRST such supplier ever created and reused it — so "LG India
+          // Distribution", "SAMSUNG India Distribution" etc. all silently
+          // resolved to whichever brand got created first, and never became
+          // their own Supplier record even though the PO/bill kept their real
+          // name. Leaving it blank forces a real number before saving.
+          supplierPhone: matchedSupplier?.phone || "",
           supplierId: matchedSupplier?._id || "auto",
           linkedPoNo: "",
           noPoReason: "",
@@ -456,6 +472,16 @@ export function PurchaseCreationModal({ isOpen, onClose, mode = "entry", preload
     };
   }, [form.items]);
 
+  // Untouched, this defaults to the full total — the same "fully paid" behaviour
+  // as before this field existed. Editing it down is what records a bill that's
+  // unpaid or only partly paid, so the supplier's payable balance isn't always zero.
+  const paidAmount = amountPaidNow === ""
+    ? totals.total
+    : Math.max(0, Math.min(totals.total, Number(amountPaidNow) || 0));
+  const balanceAmount = Math.max(0, totals.total - paidAmount);
+  const entryPaymentStatus: "paid" | "partial" | "pending" =
+    balanceAmount <= 0 ? "paid" : (paidAmount > 0 ? "partial" : "pending");
+
   const saveMutation = useMutation({
     networkMode: "always",
     mutationFn: async () => {
@@ -480,9 +506,10 @@ export function PurchaseCreationModal({ isOpen, onClose, mode = "entry", preload
         subtotal: totals.subtotal,
         gst: totals.gst,
         total: totals.total,
-        paid: currentMode === "entry" ? totals.total : 0,
-        balance: currentMode === "debit-note" ? totals.total : 0,
-        status: currentMode === "entry" ? "paid" : (currentMode === "order" ? "sent" : "pending")
+        paid: currentMode === "entry" ? paidAmount : 0,
+        balance: currentMode === "debit-note" ? totals.total : (currentMode === "entry" ? balanceAmount : 0),
+        status: currentMode === "entry" ? entryPaymentStatus : (currentMode === "order" ? "sent" : "pending"),
+        dueDate: currentMode === "entry" && balanceAmount > 0 ? (purchaseDueDate || undefined) : undefined,
       };
 
       if (currentMode === "order") {
@@ -534,6 +561,8 @@ export function PurchaseCreationModal({ isOpen, onClose, mode = "entry", preload
         items: [],
       });
       setSupplierLookupStatus("idle");
+      setAmountPaidNow("");
+      setPurchaseDueDate("");
     },
     onError: (error: any) => {
       toast.error(error.message || "An error occurred");
@@ -667,16 +696,31 @@ export function PurchaseCreationModal({ isOpen, onClose, mode = "entry", preload
           {/* Mode Switcher pill if needed */}
           {isEntry && (
             <div className="flex items-center gap-2">
-              <Button 
-                variant="outline" 
+              <Button
+                variant="outline"
                 size="sm"
                 onClick={() => {
+                  if (form.items.length > 0 && !confirm("This switches to creating a Purchase Order instead of a Purchase Entry (Supplier Bill) — it won't update stock or count as a received bill. Your entered items stay filled in. Continue?")) {
+                    return;
+                  }
                   setCurrentMode("order");
-                  setForm(prev => ({ ...prev, linkedPoNo: "", items: [] }));
+                  setForm(prev => ({ ...prev, linkedPoNo: "" }));
                 }}
                 className="bg-white/10 border-white/20 text-white hover:bg-white/20 text-xs h-8"
               >
                 <ShoppingBag className="w-3.5 h-3.5 mr-1.5 text-amber-300" /> Create PO First
+              </Button>
+            </div>
+          )}
+          {isOrder && mode === "entry" && (
+            <div className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setCurrentMode("entry")}
+                className="bg-white/10 border-white/20 text-white hover:bg-white/20 text-xs h-8"
+              >
+                <ClipboardList className="w-3.5 h-3.5 mr-1.5 text-emerald-300" /> Back to Purchase Entry
               </Button>
             </div>
           )}
@@ -871,8 +915,11 @@ export function PurchaseCreationModal({ isOpen, onClose, mode = "entry", preload
                       <Button
                         size="sm"
                         onClick={() => {
+                          if (form.items.length > 0 && !confirm("This switches to creating a Purchase Order instead of a Purchase Entry (Supplier Bill) — it won't update stock or count as a received bill. Your entered items stay filled in. Continue?")) {
+                            return;
+                          }
                           setCurrentMode("order");
-                          setForm(prev => ({ ...prev, linkedPoNo: "", items: [] }));
+                          setForm(prev => ({ ...prev, linkedPoNo: "" }));
                           toast.info("Switched to Purchase Order mode. Create and send PO first.");
                         }}
                         className="bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs h-8 shadow-sm"
@@ -1158,7 +1205,48 @@ export function PurchaseCreationModal({ isOpen, onClose, mode = "entry", preload
         </div>
 
         {/* Footer & Totals */}
-        <div className="bg-slate-100 p-6 rounded-b-2xl border-t border-slate-200 shrink-0">
+        <div className="bg-slate-100 p-6 rounded-b-2xl border-t border-slate-200 shrink-0 space-y-4">
+          {isEntry && (
+            <div className="bg-white p-4 rounded-xl border border-slate-200 flex flex-wrap items-end gap-4">
+              <div>
+                <Label className="text-xs font-bold text-slate-700">Amount Paid Now (₹)</Label>
+                <Input
+                  type="number"
+                  min={0}
+                  max={totals.total}
+                  placeholder={String(Math.round(totals.total))}
+                  value={amountPaidNow}
+                  onChange={(e) => setAmountPaidNow(e.target.value)}
+                  className="h-9 w-40 text-sm font-bold mt-1"
+                />
+                <p className="text-[10px] text-slate-400 mt-0.5">Blank = fully paid now. Lower it if payment is partial or on hold.</p>
+              </div>
+              <div className="text-sm">
+                <span className="text-slate-500">Balance Payable to Supplier: </span>
+                <span className={`font-mono font-black ${balanceAmount > 0 ? "text-rose-600" : "text-emerald-600"}`}>
+                  {formatCurrency(balanceAmount)}
+                </span>
+                <span className={`ml-2 text-[10px] font-bold uppercase px-2 py-0.5 rounded ${
+                  entryPaymentStatus === "paid" ? "bg-emerald-100 text-emerald-800" :
+                  entryPaymentStatus === "partial" ? "bg-amber-100 text-amber-800" :
+                  "bg-rose-100 text-rose-800"
+                }`}>
+                  {entryPaymentStatus}
+                </span>
+              </div>
+              {balanceAmount > 0 && (
+                <div>
+                  <Label className="text-xs font-bold text-slate-700">Payment Due Date</Label>
+                  <Input
+                    type="date"
+                    value={purchaseDueDate}
+                    onChange={(e) => setPurchaseDueDate(e.target.value)}
+                    className="h-9 text-sm mt-1"
+                  />
+                </div>
+              )}
+            </div>
+          )}
           <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-6">
             <div className="space-y-1">
               <div className="flex items-center gap-4 text-sm text-slate-600">

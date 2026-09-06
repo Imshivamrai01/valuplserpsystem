@@ -1,7 +1,69 @@
 import { NextResponse } from "next/server";
+import mongoose from "mongoose";
 import connectToDatabase from "@/lib/db";
 import PurchaseOrder from "@/models/PurchaseOrder";
 import Supplier from "@/models/Supplier";
+import Item from "@/models/Item";
+import StaffTask from "@/models/StaffTask";
+
+/**
+ * A Purchase Order alone never updates stock — only a Purchase Entry
+ * (the actual received bill) does. Without a nudge, a sent PO is easy to
+ * forget about once the goods physically arrive, silently leaving stock
+ * short. This drops a task on the shared board (visible on both the admin
+ * and staff dashboards) reminding someone to record the entry.
+ */
+async function createEntryReminderTask(po: any) {
+  try {
+    const dueDate = po.expectedDate
+      ? new Date(po.expectedDate).toISOString().split("T")[0]
+      : new Date(Date.now() + 10 * 24 * 60 * 60 * 1000).toISOString().split("T")[0];
+    await StaffTask.create({
+      taskTitle: `Record Purchase Entry for PO ${po.poNo}`,
+      assignedStaff: "All Staff",
+      dueDate,
+      priority: "Medium",
+      taskType: "general",
+      description: `Purchase Order ${po.poNo} was sent to ${po.supplierName} for ${formatINR(po.totalAmount)}. Once the goods arrive, record a Purchase Entry (Supplier Bill) linked to this PO so stock updates — a PO alone does not add stock.`,
+      createdBy: "System (Purchase Order Auto-Reminder)",
+    });
+  } catch (err) {
+    console.warn("Notice: purchase entry reminder task:", err);
+  }
+}
+
+function formatINR(amount: number) {
+  return `₹${Math.round(Number(amount) || 0).toLocaleString("en-IN")}`;
+}
+
+/**
+ * Placing (or editing) a Purchase Order updates the catalog's purchase price
+ * immediately, the same rate a Purchase Entry would set — so Profit & Loss
+ * reflects what was actually negotiated as soon as it's recorded, without
+ * waiting for the supplier's bill. This never touches stock quantities: a PO
+ * is an order, not received goods, so only cost basis moves here.
+ */
+async function syncPurchasePricesFromOrder(items: any[] | undefined) {
+  if (!Array.isArray(items)) return;
+  for (const item of items) {
+    const rate = Number(item.rate) || 0;
+    if (rate <= 0) continue;
+    try {
+      let existingItem = null;
+      if (item.itemId && mongoose.isValidObjectId(item.itemId)) {
+        existingItem = await Item.findById(item.itemId);
+      }
+      if (!existingItem && item.name) {
+        existingItem = await Item.findOne({ name: { $regex: new RegExp(`^${String(item.name).trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i") } });
+      }
+      if (existingItem) {
+        await Item.findByIdAndUpdate(existingItem._id, { $set: { purchasePrice: rate } });
+      }
+    } catch (err) {
+      console.warn("Notice: purchase price sync from PO item:", err);
+    }
+  }
+}
 
 export async function GET() {
   try {
@@ -80,6 +142,8 @@ export async function POST(req: Request) {
     };
 
     const po = await PurchaseOrder.create(payload);
+    await syncPurchasePricesFromOrder(body.items);
+    await createEntryReminderTask(po);
     return NextResponse.json({ success: true, data: po });
   } catch (error: any) {
     if (error.code === 11000) {
@@ -89,6 +153,8 @@ export async function POST(req: Request) {
         const fallbackPoNo = `PO-${new Date().getFullYear()}-${Date.now().toString().slice(-4)}-${randomSuffix}`;
         const fallbackPayload = { ...body, poNo: fallbackPoNo };
         const po = await PurchaseOrder.create(fallbackPayload);
+        await syncPurchasePricesFromOrder(body.items);
+        await createEntryReminderTask(po);
         return NextResponse.json({ success: true, data: po });
       } catch (retryErr: any) {
         return NextResponse.json({ success: false, error: "Failed to allocate unique PO number. Please try again." }, { status: 400 });
@@ -111,10 +177,12 @@ export async function PUT(req: Request) {
     await connectToDatabase();
     
     const updatedPO = await PurchaseOrder.findOneAndUpdate({ poNo }, body, { new: true });
-    
+
     if (!updatedPO) {
       return NextResponse.json({ success: false, error: "Purchase Order not found" }, { status: 404 });
     }
+
+    await syncPurchasePricesFromOrder(body.items);
 
     return NextResponse.json({ success: true, data: updatedPO });
   } catch (error: any) {

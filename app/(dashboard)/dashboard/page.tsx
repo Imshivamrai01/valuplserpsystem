@@ -809,6 +809,10 @@ export default function DashboardPage() {
 
   const refreshAllDashboard = () => {
     loadAllDashboardData();
+    // Previously left out — this only reloaded the aggregate stats, so a bill
+    // created (or its due cleared) elsewhere never updated the Due Collections
+    // & Khata Settlement widget's own invoice list until the page was reloaded.
+    fetchDueInvoices();
   };
 
   // Mount effect with offline listeners and instant caching
@@ -1263,31 +1267,39 @@ export default function DashboardPage() {
 
       <div className="space-y-4">
         {/* ═══════════════════════════════════════════════════════════════════════════════
-            🏆 SECTION 1: PAYMENT & BILL DISTRIBUTION + SALES & ORDER TRENDS (2 CARDS)
+            🏆 POOL A: PAYMENT & BILL DISTRIBUTION + SALES & ORDER TRENDS + KEY KPIs +
+            PAYMENT LEAKAGE + ALERT CENTER — a manually-balanced 3-column layout, not CSS
+            `columns-N` auto-balance. Auto-balance for an auto-height multicol container is
+            inconsistent across browsers (some just fill column 1 and dump the rest into
+            column 2/3 instead of truly balancing), which is exactly the empty-column bug
+            seen in testing. Explicit column groups here are sized by hand so the result is
+            deterministic: [Payment] | [Trends+Trends KPIs+Purchase KPIs] | [Leakage+Alerts].
         ═══════════════════════════════════════════════════════════════════════════════ */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 items-stretch">
-          {/* CARD 1 (LEFT): PAYMENT & BILL DISTRIBUTION WITH DONUT */}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-3 items-start">
+          {/* COLUMN 1: PAYMENT & BILL DISTRIBUTION WITH DONUT */}
           <div className="bg-white rounded-xl border border-slate-200/90 shadow-sm p-3 flex flex-col justify-between hover:shadow-md transition-all">
-            <div className="flex items-center justify-between pb-2.5 border-b border-slate-100">
+            <div className="pb-2.5 border-b border-slate-100 space-y-2">
               <div className="flex items-center gap-3">
-                <div className="w-7 h-7 rounded-lg bg-blue-50 border border-blue-200/60 flex items-center justify-center text-[#3F63AD]">
+                <div className="w-7 h-7 rounded-lg bg-blue-50 border border-blue-200/60 flex items-center justify-center text-[#3F63AD] shrink-0">
                   <PieChartIcon className="w-5 h-5" />
                 </div>
-                <div>
-                  <h2 className="text-sm font-black text-slate-900 tracking-tight flex items-center gap-2">
+                <div className="min-w-0">
+                  <h2 className="text-sm font-black text-slate-900 tracking-tight truncate">
                     Payment & Bill Distribution
-                    <Badge className="bg-emerald-50 text-emerald-800 border-emerald-200 text-xs font-bold px-2 py-0.5">
-                      {totalBilledCount} Total Bills
-                    </Badge>
                   </h2>
-                  <p className="text-xs text-slate-500 font-medium">Channel-wise collection amount, bill count & revenue share</p>
+                  <p className="text-xs text-slate-500 font-medium truncate">Channel-wise collection & revenue share</p>
                 </div>
               </div>
-              <DateRangeFilter 
-                value={widgetFilters.pie} 
-                onChange={(val, start, end) => handleWidgetFilterChange('pie', val, start, end)}
-                className="w-[115px] h-8 text-xs font-semibold"
-              />
+              <div className="flex items-center flex-wrap gap-2">
+                <Badge className="bg-emerald-50 text-emerald-800 border-emerald-200 text-xs font-bold px-2 py-0.5">
+                  {totalBilledCount} Total Bills
+                </Badge>
+                <DateRangeFilter
+                  value={widgetFilters.pie}
+                  onChange={(val, start, end) => handleWidgetFilterChange('pie', val, start, end)}
+                  className="flex-1 min-w-[115px] h-8 text-xs font-semibold"
+                />
+              </div>
             </div>
 
             {/* ─── TOTAL SALES SUMMARY PANEL (STACKED BAR + CHANNEL ROWS) ─── */}
@@ -1335,7 +1347,7 @@ export default function DashboardPage() {
                       <div
                         key={item.key}
                         onClick={() => router.push(`/dashboard/reports?type=${item.key}&dateFilter=${encodeURIComponent(widgetFilters.pie)}`)}
-                        className="flex items-center justify-between gap-3 py-2.5 cursor-pointer group"
+                        className="flex items-center justify-between gap-3 py-1.5 cursor-pointer group"
                       >
                         <div className="flex items-center gap-3 min-w-0">
                           <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: item.color }} />
@@ -1445,8 +1457,8 @@ export default function DashboardPage() {
               className="bg-emerald-50/90 border border-emerald-200 rounded-xl p-3 flex items-center justify-between cursor-pointer hover:bg-emerald-100/80 transition-all mt-2"
             >
               <div className="flex items-center gap-3">
-                <div className="w-8 h-8 rounded-lg bg-emerald-100 flex items-center justify-center text-emerald-700">
-                  <Sparkles className="w-4 h-4" />
+                <div className="w-7 h-7 rounded-lg bg-emerald-100 flex items-center justify-center text-emerald-700">
+                  <Sparkles className="w-5 h-5" />
                 </div>
                 <div>
                   <p className="font-black text-emerald-950 text-xs sm:text-sm">Extended Warranty Add-ons</p>
@@ -1464,35 +1476,36 @@ export default function DashboardPage() {
             </div>
           </div>
 
-          {/* CARD 2 (RIGHT): SALES & ORDER TRENDS GRAPH */}
+          {/* COLUMN 2: SALES & ORDER TRENDS + KEY BUSINESS SNAPSHOT + OPERATIONAL SNAPSHOT */}
+          <div className="flex flex-col gap-3">
           <div className="bg-white rounded-xl border border-slate-200/90 shadow-sm p-3 flex flex-col justify-between hover:shadow-md transition-all">
-            <div className="flex items-center justify-between pb-2.5 border-b border-slate-100">
+            <div className="pb-2.5 border-b border-slate-100 space-y-2">
               <div className="flex items-center gap-3">
-                <div className="w-7 h-7 rounded-lg bg-indigo-50 border border-indigo-200/60 flex items-center justify-center text-indigo-600">
+                <div className="w-7 h-7 rounded-lg bg-indigo-50 border border-indigo-200/60 flex items-center justify-center text-indigo-600 shrink-0">
                   <BarChart3 className="w-5 h-5" />
                 </div>
-                <div>
-                  <h3 className="text-sm font-black text-slate-900 tracking-tight">
+                <div className="min-w-0">
+                  <h3 className="text-sm font-black text-slate-900 tracking-tight truncate">
                     Sales & Order Trends
                   </h3>
-                  <p className="text-xs text-slate-500 font-medium">Hourly business trajectory & daily sales volume</p>
+                  <p className="text-xs text-slate-500 font-medium truncate">Hourly & daily sales volume</p>
                 </div>
               </div>
-              <DateRangeFilter 
-                value={widgetFilters.trends} 
+              <DateRangeFilter
+                value={widgetFilters.trends}
                 onChange={(val, start, end) => handleWidgetFilterChange('trends', val, start, end)}
-                className="w-[115px] h-8 text-xs font-semibold"
+                className="w-full h-8 text-xs font-semibold"
               />
             </div>
 
-            <div className="h-[210px] w-full pt-3">
+            <div className="h-[190px] w-full pt-3">
               {widgetLoading.trends ? (
                 <div className="w-full h-full flex items-center justify-center animate-pulse">
                   <div className="h-36 w-full bg-slate-100 rounded-xl"></div>
                 </div>
               ) : (
                 <ResponsiveContainer width="100%" height="100%">
-                  <AreaChart data={widgetData.trends?.dailyRevenue || DAILY_REVENUE} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                  <AreaChart data={widgetData.trends?.dailyRevenue || DAILY_REVENUE} margin={{ top: 10, right: 5, left: -25, bottom: 0 }}>
                     <defs>
                       <linearGradient id="colorTrends" x1="0" y1="0" x2="0" y2="1">
                         <stop offset="5%" stopColor="#76C043" stopOpacity={0.4}/>
@@ -1514,22 +1527,141 @@ export default function DashboardPage() {
               )}
             </div>
 
-            <div className="pt-3 border-t border-slate-100 flex items-center justify-between text-xs font-semibold text-slate-600">
-              <span className="flex items-center gap-2"><span className="w-3 h-3 rounded-full bg-[#76C043]" /> Total Revenue</span>
-              <span className="flex items-center gap-2"><span className="w-3 h-3 rounded-full bg-[#3F63AD]" /> Digital Collections</span>
-              <span className="flex items-center gap-1.5 text-amber-700 bg-amber-50 px-2 py-0.5 rounded-md border border-amber-200">
-                <Clock className="w-3.5 h-3.5" /> Peak: 1PM-3PM
+            <div className="pt-3 border-t border-slate-100 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-[11px] font-semibold text-slate-600">
+              <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-[#76C043] shrink-0" /> Total Revenue</span>
+              <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-[#3F63AD] shrink-0" /> Digital</span>
+              <span className="flex items-center gap-1 text-amber-700 bg-amber-50 px-1.5 py-0.5 rounded-md border border-amber-200 ml-auto">
+                <Clock className="w-3 h-3" /> Peak: 1-3PM
               </span>
             </div>
           </div>
-        </div>
 
+          {/* CARD 3A + 3B: two independent compact KPI cards — each flows on
+              its own into whichever column the balancer picks (they used to
+              be force-paired in one stacked wrapper; letting them separate
+              gives the multi-column balancer more freedom to avoid gaps). */}
+          <div className="bg-white rounded-xl border border-slate-200/90 shadow-sm p-3 hover:shadow-md transition-all">
+              <div className="flex items-center gap-3 pb-2.5 border-b border-slate-100">
+                <div className="w-7 h-7 rounded-lg bg-emerald-50 border border-emerald-200/60 flex items-center justify-center text-emerald-600 shrink-0">
+                  <IndianRupee className="w-5 h-5" />
+                </div>
+                <div className="min-w-0">
+                  <h3 className="text-sm font-black text-slate-900 tracking-tight truncate">
+                    Key Business Snapshot
+                  </h3>
+                  <p className="text-xs text-slate-500 font-medium truncate">Core revenue, bills & purchase KPIs</p>
+                </div>
+              </div>
 
-        {/* ═══════════════════════════════════════════════════════════════════════════════
-            🛡️ SECTION 2: PAYMENT LEAKAGE & OPERATIONAL SECURITY (2 CARDS)
-        ═══════════════════════════════════════════════════════════════════════════════ */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 items-stretch">
-          {/* CARD 1 (LEFT): 6 PAYMENT LEAKAGE SORT BOXES (PETPOOJA STYLE) */}
+              <div className="divide-y divide-slate-100 py-1">
+                {[
+                  {
+                    label: "Gross Sales",
+                    value: formatCurrency((kpiMetrics.cashRevenue || 0) + (kpiMetrics.onlineRevenue || 0) + (kpiMetrics.financeRevenue || 0) + (kpiMetrics.upiRevenue || 0) + (kpiMetrics.cardRevenue || 0)),
+                    icon: TrendingUp,
+                    color: "text-[#76C043]",
+                    onClick: () => router.push(`/dashboard/reports?type=all&dateFilter=${widgetFilters.kpi}`),
+                  },
+                  {
+                    label: "Total Bills",
+                    value: `${kpiMetrics.totalOrders || 0}`,
+                    icon: Receipt,
+                    color: "text-blue-600",
+                    onClick: () => router.push(`/dashboard/reports?type=orders&dateFilter=${widgetFilters.kpi}`),
+                  },
+                  {
+                    label: "Avg Order Value",
+                    value: formatCurrency(kpiMetrics.totalOrders ? (((kpiMetrics.cashRevenue || 0) + (kpiMetrics.onlineRevenue || 0) + (kpiMetrics.financeRevenue || 0) + (kpiMetrics.upiRevenue || 0) + (kpiMetrics.cardRevenue || 0)) / kpiMetrics.totalOrders) : 0),
+                    icon: IndianRupee,
+                    color: "text-indigo-600",
+                    onClick: () => router.push(`/dashboard/reports?type=aov&dateFilter=${widgetFilters.kpi}`),
+                  },
+                  {
+                    label: "Avg Purchase Value",
+                    value: formatCurrency(kpiMetrics.avgPurchaseValue || 0),
+                    icon: ShoppingCart,
+                    color: "text-amber-600",
+                    onClick: () => router.push("/purchase/entries"),
+                  },
+                ].map((row) => (
+                  <div
+                    key={row.label}
+                    onClick={row.onClick}
+                    className="flex items-center justify-between gap-2 py-2 cursor-pointer group"
+                  >
+                    <span className="flex items-center gap-2 min-w-0 text-xs font-semibold text-slate-600 group-hover:text-slate-900 transition-colors">
+                      <row.icon className={`w-3.5 h-3.5 shrink-0 ${row.color}`} />
+                      <span className="truncate">{row.label}</span>
+                    </span>
+                    <span className="text-sm font-black font-mono text-slate-900 shrink-0">{row.value}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* 3B: OPERATIONAL SNAPSHOT — fills the rest of the column with more real numbers */}
+            <div className="bg-white rounded-xl border border-slate-200/90 shadow-sm p-3 hover:shadow-md transition-all">
+              <div className="flex items-center gap-3 pb-2.5 border-b border-slate-100">
+                <div className="w-7 h-7 rounded-lg bg-purple-50 border border-purple-200/60 flex items-center justify-center text-purple-600 shrink-0">
+                  <Wallet className="w-5 h-5" />
+                </div>
+                <div className="min-w-0">
+                  <h3 className="text-sm font-black text-slate-900 tracking-tight truncate">
+                    Operational Snapshot
+                  </h3>
+                  <p className="text-xs text-slate-500 font-medium truncate">Stock, expenses & outstanding dues</p>
+                </div>
+              </div>
+
+              <div className="divide-y divide-slate-100 py-1">
+                {[
+                  {
+                    label: "Total Stock Value",
+                    value: formatCurrency(stockBreakdown.totalStockValue || 0),
+                    icon: Package,
+                    color: "text-[#3F63AD]",
+                    onClick: () => { setStockGroupFilter("all"); setStockCategoryFilter("all"); setOpenStockModal(true); },
+                  },
+                  {
+                    label: "Total Expenses",
+                    value: formatCurrency(metrics.totalExpenses || 0),
+                    icon: Receipt,
+                    color: "text-rose-600",
+                    onClick: () => { setExpenseModalModeFilter("all"); setActiveModal("expenses"); },
+                  },
+                  {
+                    label: "Net Profit",
+                    value: formatCurrency(metrics.netProfit || 0),
+                    icon: TrendingUp,
+                    color: (metrics.netProfit || 0) >= 0 ? "text-emerald-600" : "text-rose-600",
+                    onClick: () => router.push("/accounting/profit-loss"),
+                  },
+                  {
+                    label: "Khata Outstanding",
+                    value: formatCurrency(allTimeDueOutstanding || 0),
+                    icon: AlertTriangle,
+                    color: "text-amber-600",
+                    onClick: () => setActiveModal("due"),
+                  },
+                ].map((row) => (
+                  <div
+                    key={row.label}
+                    onClick={row.onClick}
+                    className="flex items-center justify-between gap-2 py-2 cursor-pointer group"
+                  >
+                    <span className="flex items-center gap-2 min-w-0 text-xs font-semibold text-slate-600 group-hover:text-slate-900 transition-colors">
+                      <row.icon className={`w-3.5 h-3.5 shrink-0 ${row.color}`} />
+                      <span className="truncate">{row.label}</span>
+                    </span>
+                    <span className="text-sm font-black font-mono text-slate-900 shrink-0">{row.value}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* COLUMN 3: PAYMENT LEAKAGE & VOID AUDIT + ALERT CENTER */}
+          <div className="flex flex-col gap-3">
           <div className="bg-white rounded-xl border border-slate-200/90 shadow-sm p-3 flex flex-col justify-between hover:shadow-md transition-all">
             <div className="flex items-center justify-between pb-2.5 border-b border-slate-100">
               <div className="flex items-center gap-3">
@@ -1543,7 +1675,7 @@ export default function DashboardPage() {
                       Live Audit
                     </span>
                   </h3>
-                  <p className="text-xs text-slate-500 font-medium">Security tracker for cancelled bills, modified items, shifted orders & reprints</p>
+                  <p className="text-xs text-slate-500 font-medium">Security tracker for cancelled bills, shifted orders, price/qty tampering & reprints</p>
                 </div>
               </div>
               <Button 
@@ -1556,7 +1688,7 @@ export default function DashboardPage() {
               </Button>
             </div>
 
-            {/* 6 LEAKAGE SORT BOXES GRID (PETPOOJA STYLE) */}
+            {/* 5 LEAKAGE SORT BOXES GRID (PETPOOJA STYLE) */}
             <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 py-3">
               {/* 1. CANCELLED */}
               <div
@@ -1605,31 +1737,6 @@ export default function DashboardPage() {
                 </p>
                 <span className="text-xs text-red-800 font-semibold flex items-center justify-between pt-1.5 border-t border-red-300/60">
                   <span>Bills &amp; estimates</span> <ArrowRight className="w-3 h-3 group-hover:translate-x-0.5 transition-transform" />
-                </span>
-              </div>
-
-              {/* 3. MODIFIED */}
-              <div
-                onClick={() => setLeakageModal({
-                  type: "modified",
-                  title: "Modified Orders & Items",
-                  description: "Invoices or line items modified after generation",
-                  invoices: leakage.modified?.invoices || [],
-                  color: "#F59E0B"
-                })}
-                className="p-2.5 rounded-lg border border-amber-200 bg-amber-50/50 hover:bg-amber-100/60 hover:border-amber-400 hover:shadow-sm transition-all cursor-pointer group flex flex-col justify-between"
-              >
-                <div className="flex items-center justify-between mb-1.5">
-                  <span className="text-xs font-bold text-amber-800 uppercase tracking-wider">Modified</span>
-                  <Badge className="bg-amber-200 text-amber-900 text-[10px] font-black px-1.5 py-0.5 border-none">
-                    {leakage.modified?.count || 0} Invoices
-                  </Badge>
-                </div>
-                <p className="text-sm font-black text-amber-700 font-mono my-0.5">
-                  {formatCurrency(leakage.modified?.amount || 0)}
-                </p>
-                <span className="text-xs text-amber-800 font-semibold flex items-center justify-between pt-1.5 border-t border-amber-200/60">
-                  <span>Item edits</span> <ArrowRight className="w-3 h-3 group-hover:translate-x-0.5 transition-transform" />
                 </span>
               </div>
 
@@ -1829,18 +1936,20 @@ export default function DashboardPage() {
               </div>
             </div>
           </div>
+          </div>
         </div>
 
-
         {/* ═══════════════════════════════════════════════════════════════════════════════
-            🤝 SECTION 2B: VENDOR & SUPPLIER LEDGER SUMMARY
+            🤝 VENDOR & SUPPLIER LEDGER SUMMARY
 
-            Deliberately its own row rather than folded into the revenue and expense
-            cards above. Vendor money in is not a counter sale, and a supplier payout
-            settles a liability the purchase already expensed — merging either would
-            change every figure on this dashboard and understate net profit.
+            Deliberately its own full-width row rather than folded into the revenue and
+            expense cards above. Vendor money in is not a counter sale, and a supplier
+            payout settles a liability the purchase already expensed — merging either
+            would change every figure on this dashboard and understate net profit. Its
+            4-tile ledger grid also genuinely needs full width to stay readable, so it
+            sits between the two manually-balanced column pools rather than inside one.
         ═══════════════════════════════════════════════════════════════════════════════ */}
-        <div className="bg-white rounded-xl border border-slate-200/90 shadow-sm p-4 hover:shadow-md transition-all">
+        <div className="bg-white rounded-xl border border-slate-200/90 shadow-sm p-3 hover:shadow-md transition-all">
           <div className="flex items-center justify-between pb-2.5 border-b border-slate-100">
             <div className="flex items-center gap-3">
               <div className="w-7 h-7 rounded-lg bg-indigo-50 border border-indigo-200/60 flex items-center justify-center text-indigo-600">
@@ -1976,12 +2085,14 @@ export default function DashboardPage() {
           </p>
         </div>
 
-
         {/* ═══════════════════════════════════════════════════════════════════════════════
-            📊 SECTION 3: KEY BUSINESS METRICS & SHOWROOM OPERATING EXPENSES (2 CARDS)
+            📊 POOL B: KEY BUSINESS METRICS + EXPENSES + CATEGORY STOCK + SALES STAFF
+            LEADERBOARD + TOP SELLING PRODUCTS — manually balanced (same reasoning as
+            Pool A): [KeyBiz+Expense] | [CategoryStock] | [SalesLeaderboard+TopSelling].
         ═══════════════════════════════════════════════════════════════════════════════ */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 items-stretch">
-          {/* CARD 1 (LEFT): 4 BUSINESS HEALTH KPIS */}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-3 items-start">
+          {/* COLUMN 1: KEY BUSINESS PERFORMANCE + EXPENSE & CASH WITHDRAWAL */}
+          <div className="flex flex-col gap-3">
           <div className="bg-white rounded-xl border border-slate-200/90 shadow-sm p-3 flex flex-col justify-between hover:shadow-md transition-all">
             <div className="flex items-center justify-between pb-2.5 border-b border-slate-100">
               <div className="flex items-center gap-3">
@@ -2000,7 +2111,7 @@ export default function DashboardPage() {
               />
             </div>
 
-            <div className="grid grid-cols-2 gap-3.5 py-3">
+            <div className="grid grid-cols-2 gap-3 py-3">
               {/* GROSS SALES */}
               <div
                 onClick={() => router.push(`/dashboard/reports?type=all&dateFilter=${widgetFilters.kpi}`)}
@@ -2055,6 +2166,24 @@ export default function DashboardPage() {
                 </div>
               </div>
 
+              {/* AVERAGE PURCHASE — purchase-side counterpart to AOV */}
+              <div
+                onClick={() => router.push("/purchase/entries")}
+                className="p-3 rounded-lg border border-slate-200 bg-slate-50/60 hover:bg-white hover:border-amber-500 hover:shadow-sm transition-all cursor-pointer group flex flex-col justify-between"
+              >
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">Avg Purchase Value</span>
+                  <ShoppingCart className="w-4 h-4 text-amber-600" />
+                </div>
+                <p className="text-lg font-black text-slate-900 font-mono">
+                  {formatCurrency(kpiMetrics.avgPurchaseValue || 0)}
+                </p>
+                <div className="mt-2.5 pt-2 border-t border-slate-200/60 flex items-center justify-between text-xs font-medium text-slate-500">
+                  <span>{kpiMetrics.totalPurchaseBills || 0} supplier bill{kpiMetrics.totalPurchaseBills === 1 ? "" : "s"}</span>
+                  <ArrowRight className="w-3.5 h-3.5 text-slate-300 group-hover:translate-x-0.5 transition-transform" />
+                </div>
+              </div>
+
               {/* TOTAL STOCKS */}
               <div
                 onClick={() => { setStockGroupFilter("all"); setStockCategoryFilter("all"); setOpenStockModal(true); }}
@@ -2085,8 +2214,8 @@ export default function DashboardPage() {
             {/* 1. HEADER */}
             <div className="flex items-center justify-between pb-3 border-b border-slate-100">
               <div className="flex items-center gap-2.5">
-                <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-rose-50 to-red-100 border border-rose-200/80 flex items-center justify-center text-rose-600 shadow-sm">
-                  <Receipt className="w-4 h-4" />
+                <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-rose-50 to-red-100 border border-rose-200/80 flex items-center justify-center text-rose-600 shadow-sm">
+                  <Receipt className="w-5 h-5" />
                 </div>
                 <div>
                   <h3 className="text-sm font-black text-slate-900 tracking-tight flex items-center gap-2">
@@ -2376,14 +2505,9 @@ export default function DashboardPage() {
               </span>
             </div>
           </div>
-        </div>
+          </div>
 
-
-        {/* ═══════════════════════════════════════════════════════════════════════════════
-            🏷️ SECTION 4: CATEGORY STOCK & SALES STAFF LEADERBOARD (2 CARDS)
-        ═══════════════════════════════════════════════════════════════════════════════ */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 items-stretch">
-          {/* CARD 1 (LEFT): CATEGORY STOCK & WARRANTY OVERVIEW */}
+          {/* COLUMN 2: CATEGORY STOCK & WARRANTY OVERVIEW */}
           <div className="bg-white rounded-xl border border-slate-200/90 shadow-sm p-3 flex flex-col justify-between hover:shadow-md transition-all">
             <div className="flex items-center justify-between pb-2.5 border-b border-slate-100">
               <div className="flex items-center gap-3">
@@ -2411,7 +2535,7 @@ export default function DashboardPage() {
               </Button>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3.5 py-3">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 py-3">
               {/* ELECTRONICS STOCK — umbrella group (fridge, cooler, AC, TV, appliances…) */}
               <div
                 onClick={() => { setStockGroupFilter("electronics"); setStockCategoryFilter("all"); setOpenStockModal(true); }}
@@ -2509,7 +2633,7 @@ export default function DashboardPage() {
                 <div className="space-y-1.5">
                   {[...stockItems]
                     .sort((a, b) => (b.stockValue || 0) - (a.stockValue || 0))
-                    .slice(0, 4)
+                    .slice(0, 3)
                     .map((it: any) => (
                       <div
                         key={it._id || it.code}
@@ -2576,7 +2700,8 @@ export default function DashboardPage() {
             </div>
           </div>
 
-          {/* CARD 2 (RIGHT): SALES EXECUTIVE LEADERBOARD */}
+          {/* COLUMN 3: SALES STAFF LEADERBOARD + TOP SELLING PRODUCTS */}
+          <div className="flex flex-col gap-3">
           <div className="bg-white rounded-xl border border-slate-200/90 shadow-sm p-3 flex flex-col justify-between hover:shadow-md transition-all">
             <div className="flex items-center justify-between pb-2.5 border-b border-slate-100">
               <div className="flex items-center gap-3">
@@ -2644,13 +2769,8 @@ export default function DashboardPage() {
               <span className="font-bold text-slate-700">Active Staff</span>
             </div>
           </div>
-        </div>
 
-
-        {/* ═══════════════════════════════════════════════════════════════════════════════
-            📱⚡ SECTION: TOP SELLING PRODUCTS — MOBILES & ELECTRONICS (COMPACT SLEEK CARDS)
-        ═══════════════════════════════════════════════════════════════════════════════ */}
-        <div className="space-y-3">
+          {/* TOP SELLING PRODUCTS header — stacked in this same column, right above the two product cards below it. */}
           <div className="flex flex-wrap items-center justify-between gap-2 px-1">
             <div className="flex items-center gap-2">
               <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-[#3F63AD] to-purple-600 flex items-center justify-center text-white shadow-xs">
@@ -2715,7 +2835,6 @@ export default function DashboardPage() {
             </div>
           </div>
 
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 items-stretch">
             {/* 📱 CARD 1: TOP SELLING MOBILES (COMPACT) */}
             {(topSellingCategoryTab === "all" || topSellingCategoryTab === "mobiles") && (() => {
               const mobilesList: any[] = (widgetData.products?.topMobiles ?? data?.topMobiles ?? []).slice(0, 4);
@@ -2724,7 +2843,7 @@ export default function DashboardPage() {
               const totalMobileUnits = mobilesList.reduce((sum, m) => sum + (m.sales || 0), 0);
 
               return (
-                <div className={cn("bg-white rounded-xl border border-slate-200/90 shadow-xs p-3.5 flex flex-col justify-between hover:shadow-sm transition-all", topSellingCategoryTab === "mobiles" && "lg:col-span-2")}>
+                <div className="bg-white rounded-xl border border-slate-200/90 shadow-sm p-3 flex flex-col justify-between hover:shadow-md transition-all">
                   <div>
                     <div className="flex items-center justify-between pb-2.5 border-b border-slate-100">
                       <div className="flex items-center gap-2">
@@ -2829,7 +2948,7 @@ export default function DashboardPage() {
               const totalElecUnits = electronicsList.reduce((sum, e) => sum + (e.sales || 0), 0);
 
               return (
-                <div className={cn("bg-white rounded-xl border border-slate-200/90 shadow-xs p-3.5 flex flex-col justify-between hover:shadow-sm transition-all", topSellingCategoryTab === "electronics" && "lg:col-span-2")}>
+                <div className="bg-white rounded-xl border border-slate-200/90 shadow-sm p-3 flex flex-col justify-between hover:shadow-md transition-all">
                   <div>
                     <div className="flex items-center justify-between pb-2.5 border-b border-slate-100">
                       <div className="flex items-center gap-2">
@@ -2928,12 +3047,14 @@ export default function DashboardPage() {
           </div>
         </div>
 
-
         {/* ═══════════════════════════════════════════════════════════════════════════════
-            📋 SECTION 5: DETAILED PAYMENT LOG & RECENT INVOICES LEDGER (2 CARDS)
+            📋 POOL C: DETAILED PAYMENT LOG + RECENT INVOICES + TASK DELEGATION + LEAD
+            PIPELINE — manually balanced: [PaymentLog+RecentInvoices] | [TaskDelegation]
+            | [LeadPipeline].
         ═══════════════════════════════════════════════════════════════════════════════ */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 items-stretch">
-          {/* CARD 1 (LEFT): DETAILED PAYMENT LOG */}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-3 items-start">
+          {/* COLUMN 1: DETAILED PAYMENT LOG + RECENT INVOICES & BILLS */}
+          <div className="flex flex-col gap-3">
           <div className="bg-white rounded-xl border border-slate-200/90 shadow-sm p-3 flex flex-col justify-between hover:shadow-md transition-all">
             <div className="flex items-center justify-between pb-2.5 border-b border-slate-100">
               <div className="flex items-center gap-3">
@@ -3085,8 +3206,8 @@ export default function DashboardPage() {
                   className="flex items-center justify-between p-2.5 hover:bg-slate-50 rounded-xl transition-colors cursor-pointer group"
                 >
                   <div className="flex items-center gap-3">
-                    <div className="w-8 h-8 rounded-lg bg-[#3F63AD]/10 flex items-center justify-center text-[#3F63AD] group-hover:bg-[#3F63AD] group-hover:text-white transition-colors">
-                      <Printer className="w-4 h-4" />
+                    <div className="w-7 h-7 rounded-lg bg-[#3F63AD]/10 flex items-center justify-center text-[#3F63AD] group-hover:bg-[#3F63AD] group-hover:text-white transition-colors">
+                      <Printer className="w-5 h-5" />
                     </div>
                     <div>
                       <div className="flex items-center gap-2">
@@ -3128,13 +3249,9 @@ export default function DashboardPage() {
               <span className="font-bold text-slate-700">Value Plus Format</span>
             </div>
           </div>
-        </div>
+          </div>
 
-        {/* ═══════════════════════════════════════════════════════════════════════════════
-            🎯 SECTION 6: ADMIN & STAFF TASK DELEGATION + LEAD PIPELINE & CONVERSION FUNNEL (2 CARDS)
-        ═══════════════════════════════════════════════════════════════════════════════ */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 items-stretch">
-          {/* CARD 1 (LEFT): ADMIN & STAFF TASK DELEGATION */}
+          {/* COLUMN 2: ADMIN & STAFF TASK DELEGATION */}
           <div className="bg-white rounded-xl border border-slate-200/90 shadow-sm p-3 flex flex-col justify-between hover:shadow-md transition-all">
             <div>
               <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-2.5 border-b border-slate-100 gap-3">
@@ -3306,7 +3423,7 @@ export default function DashboardPage() {
             </div>
           </div>
 
-          {/* CARD 2 (RIGHT): LEAD PIPELINE & CONVERSION FUNNEL */}
+          {/* COLUMN 3: LEAD PIPELINE & CONVERSION FUNNEL */}
           <div className="bg-white rounded-xl border border-slate-200/90 shadow-sm p-3 flex flex-col justify-between hover:shadow-md transition-all">
             <div>
               <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-2.5 border-b border-slate-100 gap-3">
@@ -3689,8 +3806,15 @@ export default function DashboardPage() {
                   ) : (
                     displayList.map((inv: any) => {
                       const isCleared = Number(inv.balanceAmount) === 0 || inv.dueClearedAt;
-                      const isTodayDue = inv.dueDate && (inv.dueDate.includes("T") ? inv.dueDate.split("T")[0] : inv.dueDate) === todayStr;
-                      const isOverdue = inv.dueDate && (inv.dueDate.includes("T") ? inv.dueDate.split("T")[0] : inv.dueDate) < todayStr && !isCleared;
+                      const dDateStr = inv.dueDate ? (inv.dueDate.includes("T") ? inv.dueDate.split("T")[0] : inv.dueDate) : "";
+                      const isTodayDue = dDateStr === todayStr;
+                      const isOverdue = Boolean(dDateStr) && dDateStr < todayStr && !isCleared;
+                      // Whole-day difference between the promised date and today, for
+                      // "X days late" / "in N days" — not shown at all before, so an
+                      // overdue due only ever said "Overdue" with no sense of how late.
+                      const daysDiff = dDateStr
+                        ? Math.round((new Date(dDateStr + "T00:00:00").getTime() - new Date(todayStr + "T00:00:00").getTime()) / 86400000)
+                        : null;
 
                       return (
                         <tr key={inv._id || inv.invoiceNumber} className="hover:bg-slate-50/80 transition-colors">
@@ -3736,10 +3860,19 @@ export default function DashboardPage() {
                               !isTodayDue && !isOverdue && "text-slate-700 bg-slate-100"
                             )}>
                               <Calendar className="w-3 h-3" />
-                              {inv.dueDate ? (typeof inv.dueDate === 'string' && inv.dueDate.includes('T') ? inv.dueDate.split('T')[0] : inv.dueDate) : "Immediate"}
+                              {dDateStr || "Immediate"}
                             </div>
                             {isTodayDue && <span className="block text-[9px] font-bold text-rose-600 mt-0.5">⚠️ Due Today!</span>}
-                            {isOverdue && <span className="block text-[9px] font-bold text-amber-600 mt-0.5">🚨 Overdue</span>}
+                            {isOverdue && daysDiff !== null && (
+                              <span className="block text-[9px] font-bold text-amber-600 mt-0.5">
+                                🚨 {Math.abs(daysDiff)} day{Math.abs(daysDiff) === 1 ? "" : "s"} late
+                              </span>
+                            )}
+                            {!isCleared && !isTodayDue && !isOverdue && daysDiff !== null && daysDiff > 0 && (
+                              <span className="block text-[9px] font-bold text-slate-500 mt-0.5">
+                                in {daysDiff} day{daysDiff === 1 ? "" : "s"}
+                              </span>
+                            )}
                           </td>
                           <td className="p-3">
                             {isCleared ? (
