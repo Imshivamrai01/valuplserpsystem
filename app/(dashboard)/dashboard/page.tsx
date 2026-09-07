@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef, Children } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import {
@@ -121,7 +121,7 @@ function CustomTooltip({ active, payload, label }: { active?: boolean; payload?:
 }
 
 // ─── STATUS BADGE ──────────────────────────────────────────────
-function StatusBadge({ status }: { status: string }) {
+function StatusBadge({ status, className }: { status: string; className?: string }) {
   const map: Record<string, { variant: "success" | "warning" | "destructive" | "info" | "secondary"; label: string }> = {
     paid: { variant: "success", label: "Paid" },
     sent: { variant: "info", label: "Sent / Pending" },
@@ -131,7 +131,131 @@ function StatusBadge({ status }: { status: string }) {
     active: { variant: "success", label: "Active" },
   };
   const config = map[status] ?? { variant: "secondary", label: status };
-  return <Badge variant={config.variant}>{config.label}</Badge>;
+  return <Badge variant={config.variant} className={className}>{config.label}</Badge>;
+}
+
+/**
+ * Real masonry, not a CSS approximation. Static `columns-N` (auto-balance) and
+ * hand-estimated 3-way splits were both tried for the dashboard's card rows and
+ * both left visible gaps — CSS has no way to know a card's actual rendered
+ * height, especially once real data replaces the "₹0" placeholders and cards
+ * change size. This measures every child's real height after it renders (via
+ * ResizeObserver, so it keeps re-balancing as content loads or changes) and
+ * greedily places each one into whichever of the 3 columns is currently
+ * shortest — the same algorithm masonry libraries use.
+ *
+ * First paint uses a simple round-robin placement (deterministic for SSR/
+ * hydration, no server-vs-client mismatch); it corrects itself to the
+ * measured layout within a frame of mounting.
+ */
+function MasonryGrid({ gap = "gap-3", children }: { gap?: string; children: React.ReactNode }) {
+  const columns = 3;
+  const items = useMemo(() => Children.toArray(children), [children]);
+  const itemRefs = useRef<(HTMLDivElement | null)[]>([]);
+  // Held in a ref (not state) and re-pointed at the latest closure on every
+  // render, so the ResizeObserver callback set up once below always calls the
+  // CURRENT recompute — otherwise it would keep calling a stale closure that
+  // captured an outdated `items`/`setAssignment` from the render it was
+  // created in.
+  const recomputeRef = useRef<() => void>(() => {});
+  const observerRef = useRef<ResizeObserver | null>(null);
+
+  const [assignment, setAssignment] = useState<number[]>(() =>
+    items.map((_, i) => i % columns)
+  );
+
+  recomputeRef.current = () => {
+    const heights = itemRefs.current.map((el) => el?.getBoundingClientRect().height || 0);
+    if (heights.length !== items.length || heights.some((h) => h === 0)) return;
+
+    // Longest-processing-time-first: place the BIGGEST card first (into
+    // whichever column is currently shortest), then work down to the
+    // smallest. Placing cards in original DOM order instead can strand one
+    // large card alone in a column against two small ones it never gets a
+    // chance to be paired against — exactly what happened with only 4 cards
+    // in a row (one much taller than the rest, appearing last in the list).
+    // LPT is a standard bin-packing heuristic for exactly this: fewer,
+    // unevenly-sized items where naive greedy-in-order leaves a bad split.
+    //
+    // The one exception: the FIRST child (index 0) is always placed first,
+    // ahead of the LPT sort. Since every column starts at height 0, "placed
+    // first" always lands it in column 0 — i.e. top-left. Pure height-based
+    // LPT would instead let whichever card happens to be tallest win that
+    // spot, so the most important content (coded first on purpose) could
+    // drift wherever a taller sibling pushed it. Pinning index 0 keeps that
+    // placement deterministic while still letting every other card balance
+    // freely around it.
+    const restByHeight = heights
+      .map((_, i) => i)
+      .filter((i) => i !== 0)
+      .sort((a, b) => heights[b] - heights[a]);
+    const order = heights.length > 0 ? [0, ...restByHeight] : [];
+
+    const colHeights = new Array(columns).fill(0);
+    const next = new Array(heights.length);
+    order.forEach((i) => {
+      let minIdx = 0;
+      for (let c = 1; c < columns; c++) {
+        if (colHeights[c] < colHeights[minIdx]) minIdx = c;
+      }
+      colHeights[minIdx] += heights[i];
+      next[i] = minIdx;
+    });
+
+    setAssignment((prev) =>
+      prev.length === next.length && prev.every((v, i) => v === next[i]) ? prev : next
+    );
+  };
+
+  // A card that changes which column it's in gets unmounted from its old
+  // parent and remounted under its new one (React reconciles per-parent), so
+  // its DOM node is a NEW element each time — a ResizeObserver set up once on
+  // the original elements would end up watching detached nodes after the
+  // first rebalance and silently stop reacting to anything (this was the bug:
+  // layout only ever self-corrected once, on mount). Observing/unobserving
+  // from the ref callback itself, against one long-lived observer instance,
+  // keeps it correct through every rebalance and every later size change
+  // (e.g. "₹0" placeholders resolving to real data).
+  useEffect(() => {
+    const ro = new ResizeObserver(() => recomputeRef.current());
+    observerRef.current = ro;
+    itemRefs.current.forEach((el) => { if (el) ro.observe(el); });
+    recomputeRef.current();
+    return () => {
+      ro.disconnect();
+      observerRef.current = null;
+    };
+    // Re-attach when the number of items changes shape; individual item
+    // moves between columns are handled by the ref callback below instead.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [items.length]);
+
+  const setItemRef = (i: number) => (el: HTMLDivElement | null) => {
+    const prevEl = itemRefs.current[i];
+    if (prevEl && prevEl !== el) observerRef.current?.unobserve(prevEl);
+    itemRefs.current[i] = el;
+    if (el) observerRef.current?.observe(el);
+  };
+
+  const colBuckets: React.ReactNode[][] = Array.from({ length: columns }, () => []);
+  items.forEach((child, i) => {
+    const colIdx = assignment[i] ?? i % columns;
+    colBuckets[colIdx].push(
+      <div key={i} ref={setItemRef(i)}>
+        {child}
+      </div>
+    );
+  });
+
+  return (
+    <div className={`grid grid-cols-1 lg:grid-cols-3 ${gap} items-start`}>
+      {colBuckets.map((colItems, i) => (
+        <div key={i} className={`flex flex-col ${gap}`}>
+          {colItems}
+        </div>
+      ))}
+    </div>
+  );
 }
 
 // ─── MAIN DASHBOARD PAGE ───────────────────────────────────────
@@ -316,6 +440,9 @@ export default function DashboardPage() {
     },
   ]);
   const [taskTabFilter, setTaskTabFilter] = useState<"all" | "admin" | "staff" | "pending" | "completed">("all");
+  // Date-wise filter for the task delegation widget (empty = all dates)
+  const [taskDateFilter, setTaskDateFilter] = useState<string>("");
+  const [taskDateRange, setTaskDateRange] = useState<{ start: string; end: string }>({ start: "", end: "" });
   const [isNewTaskModalOpen, setIsNewTaskModalOpen] = useState(false);
   const [taskForm, setTaskForm] = useState({
     taskTitle: "",
@@ -384,6 +511,9 @@ export default function DashboardPage() {
     },
   ]);
   const [leadTabFilter, setLeadTabFilter] = useState<"all" | "new" | "followup" | "converted">("all");
+  // Date-wise filter for the lead pipeline widget (empty = all dates)
+  const [leadDateFilter, setLeadDateFilter] = useState<string>("");
+  const [leadDateRange, setLeadDateRange] = useState<{ start: string; end: string }>({ start: "", end: "" });
   const [isNewLeadModalOpen, setIsNewLeadModalOpen] = useState(false);
   const [leadForm, setLeadForm] = useState({
     customerName: "",
@@ -1271,12 +1401,10 @@ export default function DashboardPage() {
             PAYMENT LEAKAGE + ALERT CENTER — a manually-balanced 3-column layout, not CSS
             `columns-N` auto-balance. Auto-balance for an auto-height multicol container is
             inconsistent across browsers (some just fill column 1 and dump the rest into
-            column 2/3 instead of truly balancing), which is exactly the empty-column bug
-            seen in testing. Explicit column groups here are sized by hand so the result is
-            deterministic: [Payment] | [Trends+Trends KPIs+Purchase KPIs] | [Leakage+Alerts].
+            column 2/3 instead of truly balancing) — real content heights are measured
+            client-side by <code>MasonryGrid</code> and columns rebalance automatically.
         ═══════════════════════════════════════════════════════════════════════════════ */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-3 items-start">
-          {/* COLUMN 1: PAYMENT & BILL DISTRIBUTION WITH DONUT */}
+        <MasonryGrid>
           <div className="bg-white rounded-xl border border-slate-200/90 shadow-sm p-3 flex flex-col justify-between hover:shadow-md transition-all">
             <div className="pb-2.5 border-b border-slate-100 space-y-2">
               <div className="flex items-center gap-3">
@@ -1476,8 +1604,6 @@ export default function DashboardPage() {
             </div>
           </div>
 
-          {/* COLUMN 2: SALES & ORDER TRENDS + KEY BUSINESS SNAPSHOT + OPERATIONAL SNAPSHOT */}
-          <div className="flex flex-col gap-3">
           <div className="bg-white rounded-xl border border-slate-200/90 shadow-sm p-3 flex flex-col justify-between hover:shadow-md transition-all">
             <div className="pb-2.5 border-b border-slate-100 space-y-2">
               <div className="flex items-center gap-3">
@@ -1536,21 +1662,30 @@ export default function DashboardPage() {
             </div>
           </div>
 
-          {/* CARD 3A + 3B: two independent compact KPI cards — each flows on
-              its own into whichever column the balancer picks (they used to
-              be force-paired in one stacked wrapper; letting them separate
-              gives the multi-column balancer more freedom to avoid gaps). */}
+          {/* CARD 3A: KEY BUSINESS SNAPSHOT — compact KPI card, flows on its
+              own into whichever column the balancer picks. */}
           <div className="bg-white rounded-xl border border-slate-200/90 shadow-sm p-3 hover:shadow-md transition-all">
-              <div className="flex items-center gap-3 pb-2.5 border-b border-slate-100">
-                <div className="w-7 h-7 rounded-lg bg-emerald-50 border border-emerald-200/60 flex items-center justify-center text-emerald-600 shrink-0">
-                  <IndianRupee className="w-5 h-5" />
+              <div className="pb-2.5 border-b border-slate-100 space-y-2">
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className="w-7 h-7 rounded-lg bg-emerald-50 border border-emerald-200/60 flex items-center justify-center text-emerald-600 shrink-0">
+                    <IndianRupee className="w-5 h-5" />
+                  </div>
+                  <div className="min-w-0">
+                    <h3 className="text-sm font-black text-slate-900 tracking-tight truncate">
+                      Key Business Snapshot
+                    </h3>
+                    <p className="text-xs text-slate-500 font-medium truncate">Core revenue, bills & purchase KPIs</p>
+                  </div>
                 </div>
-                <div className="min-w-0">
-                  <h3 className="text-sm font-black text-slate-900 tracking-tight truncate">
-                    Key Business Snapshot
-                  </h3>
-                  <p className="text-xs text-slate-500 font-medium truncate">Core revenue, bills & purchase KPIs</p>
-                </div>
+                {/* Same reasoning as Payment Leakage above: kpiMetrics comes
+                    from the universal-filter-scoped fetch, not its own
+                    per-widget one, so this drives that shared range. */}
+                <DateRangeFilter
+                  value={dateFilter}
+                  onChange={handleUniversalFilterChange}
+                  placeholder="All Dates"
+                  className="w-full h-8 text-xs font-semibold"
+                />
               </div>
 
               <div className="divide-y divide-slate-100 py-1">
@@ -1599,97 +1734,54 @@ export default function DashboardPage() {
               </div>
             </div>
 
-            {/* 3B: OPERATIONAL SNAPSHOT — fills the rest of the column with more real numbers */}
-            <div className="bg-white rounded-xl border border-slate-200/90 shadow-sm p-3 hover:shadow-md transition-all">
-              <div className="flex items-center gap-3 pb-2.5 border-b border-slate-100">
-                <div className="w-7 h-7 rounded-lg bg-purple-50 border border-purple-200/60 flex items-center justify-center text-purple-600 shrink-0">
-                  <Wallet className="w-5 h-5" />
-                </div>
-                <div className="min-w-0">
-                  <h3 className="text-sm font-black text-slate-900 tracking-tight truncate">
-                    Operational Snapshot
-                  </h3>
-                  <p className="text-xs text-slate-500 font-medium truncate">Stock, expenses & outstanding dues</p>
-                </div>
-              </div>
-
-              <div className="divide-y divide-slate-100 py-1">
-                {[
-                  {
-                    label: "Total Stock Value",
-                    value: formatCurrency(stockBreakdown.totalStockValue || 0),
-                    icon: Package,
-                    color: "text-[#3F63AD]",
-                    onClick: () => { setStockGroupFilter("all"); setStockCategoryFilter("all"); setOpenStockModal(true); },
-                  },
-                  {
-                    label: "Total Expenses",
-                    value: formatCurrency(metrics.totalExpenses || 0),
-                    icon: Receipt,
-                    color: "text-rose-600",
-                    onClick: () => { setExpenseModalModeFilter("all"); setActiveModal("expenses"); },
-                  },
-                  {
-                    label: "Net Profit",
-                    value: formatCurrency(metrics.netProfit || 0),
-                    icon: TrendingUp,
-                    color: (metrics.netProfit || 0) >= 0 ? "text-emerald-600" : "text-rose-600",
-                    onClick: () => router.push("/accounting/profit-loss"),
-                  },
-                  {
-                    label: "Khata Outstanding",
-                    value: formatCurrency(allTimeDueOutstanding || 0),
-                    icon: AlertTriangle,
-                    color: "text-amber-600",
-                    onClick: () => setActiveModal("due"),
-                  },
-                ].map((row) => (
-                  <div
-                    key={row.label}
-                    onClick={row.onClick}
-                    className="flex items-center justify-between gap-2 py-2 cursor-pointer group"
-                  >
-                    <span className="flex items-center gap-2 min-w-0 text-xs font-semibold text-slate-600 group-hover:text-slate-900 transition-colors">
-                      <row.icon className={`w-3.5 h-3.5 shrink-0 ${row.color}`} />
-                      <span className="truncate">{row.label}</span>
-                    </span>
-                    <span className="text-sm font-black font-mono text-slate-900 shrink-0">{row.value}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-
-          {/* COLUMN 3: PAYMENT LEAKAGE & VOID AUDIT + ALERT CENTER */}
-          <div className="flex flex-col gap-3">
           <div className="bg-white rounded-xl border border-slate-200/90 shadow-sm p-3 flex flex-col justify-between hover:shadow-md transition-all">
-            <div className="flex items-center justify-between pb-2.5 border-b border-slate-100">
-              <div className="flex items-center gap-3">
-                <div className="w-7 h-7 rounded-lg bg-rose-50 border border-rose-200/60 flex items-center justify-center text-rose-600">
+            <div className="pb-2.5 border-b border-slate-100 space-y-2">
+              <div className="flex items-center gap-3 min-w-0">
+                <div className="w-7 h-7 rounded-lg bg-rose-50 border border-rose-200/60 flex items-center justify-center text-rose-600 shrink-0">
                   <ShieldAlert className="w-5 h-5" />
                 </div>
-                <div>
-                  <h3 className="text-sm font-black text-slate-900 tracking-tight flex items-center gap-2">
-                    Payment Leakage & Void Audit
-                    <span className="text-[10px] font-bold uppercase tracking-wider bg-rose-100 text-rose-800 px-2 py-0.5 rounded-full border border-rose-200">
+                <div className="min-w-0">
+                  <h3 className="text-sm font-black text-slate-900 tracking-tight flex items-center gap-2 min-w-0">
+                    <span className="truncate">Payment Leakage & Void Audit</span>
+                    <span className="text-[10px] font-bold uppercase tracking-wider bg-rose-100 text-rose-800 px-2 py-0.5 rounded-full border border-rose-200 shrink-0 whitespace-nowrap">
                       Live Audit
                     </span>
                   </h3>
-                  <p className="text-xs text-slate-500 font-medium">Security tracker for cancelled bills, shifted orders, price/qty tampering & reprints</p>
+                  <p className="text-xs text-slate-500 font-medium truncate">Security tracker for cancelled bills, shifted orders, price/qty tampering & reprints</p>
                 </div>
               </div>
-              <Button 
-                size="sm" 
-                variant="ghost" 
-                onClick={() => setLeakageModal({ type: "all", title: "All Leakage & Security Logs", description: "Audit trail of all void entries, bill mutations and waivers", invoices: recentInvoices, color: "#EF4444" })}
-                className="text-xs font-bold text-rose-600 hover:text-rose-700 hover:bg-rose-50 h-8 px-3"
-              >
-                Full Audit →
-              </Button>
+              <div className="flex items-center gap-2">
+                {/* This card's numbers (leakage.*) come from the same
+                    server fetch as every other KPI on the page, scoped by
+                    the universal top filter — not an independent per-widget
+                    fetch like Payment Log/Recent Invoices have. So this
+                    filter drives that same universal range rather than a
+                    disconnected local one that would silently do nothing. */}
+                <DateRangeFilter
+                  value={dateFilter}
+                  onChange={handleUniversalFilterChange}
+                  placeholder="All Dates"
+                  className="flex-1 min-w-0 h-8 text-xs font-semibold"
+                />
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => setLeakageModal({ type: "all", title: "All Leakage & Security Logs", description: "Audit trail of all void entries, bill mutations and waivers", invoices: recentInvoices, color: "#EF4444" })}
+                  className="text-xs font-bold text-rose-600 hover:text-rose-700 hover:bg-rose-50 h-8 px-3 shrink-0"
+                >
+                  Full Audit →
+                </Button>
+              </div>
             </div>
 
             {/* 5 LEAKAGE SORT BOXES GRID (PETPOOJA STYLE) */}
-            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 py-3">
+            {/* Always 2 columns, never 3 — `sm:` reacts to viewport width, not
+                this card's own width, and the card is now a masonry column
+                (often ~1/3 of the viewport) rather than the ~1/2-width row it
+                was designed for. Forcing 3 sub-columns into that narrower
+                space is what squeezed each tile's label + badge onto top of
+                each other. */}
+            <div className="grid grid-cols-2 gap-2.5 py-3">
               {/* 1. CANCELLED */}
               <div
                 onClick={() => setLeakageModal({
@@ -1702,7 +1794,7 @@ export default function DashboardPage() {
                 className="p-2.5 rounded-lg border border-red-200 bg-red-50/50 hover:bg-red-100/60 hover:border-red-400 hover:shadow-sm transition-all cursor-pointer group flex flex-col justify-between"
               >
                 <div className="flex items-center justify-between mb-1.5">
-                  <span className="text-xs font-bold text-red-800 uppercase tracking-wider">Cancelled</span>
+                  <span className="text-xs font-bold text-red-800 uppercase tracking-wider whitespace-nowrap">Cancelled</span>
                   <Badge className="bg-red-200 text-red-900 text-[10px] font-black px-1.5 py-0.5 border-none">
                     {leakage.cancelled?.count || 0} Bills
                   </Badge>
@@ -1727,7 +1819,7 @@ export default function DashboardPage() {
                 className="p-2.5 rounded-lg border border-red-300 bg-red-100/40 hover:bg-red-100 hover:border-red-500 hover:shadow-sm transition-all cursor-pointer group flex flex-col justify-between"
               >
                 <div className="flex items-center justify-between mb-1.5">
-                  <span className="text-xs font-bold text-red-900 uppercase tracking-wider">Deleted</span>
+                  <span className="text-xs font-bold text-red-900 uppercase tracking-wider whitespace-nowrap">Deleted</span>
                   <Badge className="bg-red-300 text-red-950 text-[10px] font-black px-1.5 py-0.5 border-none">
                     {leakage.deleted?.count || 0} Docs
                   </Badge>
@@ -1752,7 +1844,7 @@ export default function DashboardPage() {
                 className="p-2.5 rounded-lg border border-blue-200 bg-blue-50/50 hover:bg-blue-100/60 hover:border-blue-400 hover:shadow-sm transition-all cursor-pointer group flex flex-col justify-between"
               >
                 <div className="flex items-center justify-between mb-1.5">
-                  <span className="text-xs font-bold text-blue-800 uppercase tracking-wider">Shifted</span>
+                  <span className="text-xs font-bold text-blue-800 uppercase tracking-wider whitespace-nowrap">Shifted</span>
                   <Badge className="bg-blue-200 text-blue-900 text-[10px] font-black px-1.5 py-0.5 border-none">
                     {leakage.shifted?.count || 0} Orders
                   </Badge>
@@ -1777,7 +1869,7 @@ export default function DashboardPage() {
                 className="p-2.5 rounded-lg border border-orange-200 bg-orange-50/50 hover:bg-orange-100/60 hover:border-orange-400 hover:shadow-sm transition-all cursor-pointer group flex flex-col justify-between"
               >
                 <div className="flex items-center justify-between mb-1.5">
-                  <span className="text-xs font-bold text-orange-800 uppercase tracking-wider">Bills Modified</span>
+                  <span className="text-xs font-bold text-orange-800 uppercase tracking-wider whitespace-nowrap">Bills Modified</span>
                   <Badge className="bg-orange-200 text-orange-900 text-[10px] font-black px-1.5 py-0.5 border-none">
                     {leakage.billsModified?.count || 0} Bills
                   </Badge>
@@ -1802,7 +1894,7 @@ export default function DashboardPage() {
                 className="p-2.5 rounded-lg border border-indigo-200 bg-indigo-50/50 hover:bg-indigo-100/60 hover:border-indigo-400 hover:shadow-sm transition-all cursor-pointer group flex flex-col justify-between"
               >
                 <div className="flex items-center justify-between mb-1.5">
-                  <span className="text-xs font-bold text-indigo-800 uppercase tracking-wider">Re-printed</span>
+                  <span className="text-xs font-bold text-indigo-800 uppercase tracking-wider whitespace-nowrap">Re-printed</span>
                   <Badge className="bg-indigo-200 text-indigo-900 text-[10px] font-black px-1.5 py-0.5 border-none">
                     {leakage.reprinted?.totalPrints || leakage.reprinted?.count || 0} Prints
                   </Badge>
@@ -1827,7 +1919,7 @@ export default function DashboardPage() {
                 className="p-2.5 rounded-lg border border-emerald-200 bg-emerald-50/50 hover:bg-emerald-100/60 hover:border-emerald-400 hover:shadow-sm transition-all cursor-pointer group flex flex-col justify-between"
               >
                 <div className="flex items-center justify-between mb-1.5">
-                  <span className="text-xs font-bold text-emerald-800 uppercase tracking-wider">Waived Off</span>
+                  <span className="text-xs font-bold text-emerald-800 uppercase tracking-wider whitespace-nowrap">Waived Off</span>
                   <Badge className="bg-emerald-200 text-emerald-900 text-[10px] font-black px-1.5 py-0.5 border-none">
                     {leakage.waivedOff?.count || 0} Entries
                   </Badge>
@@ -1849,21 +1941,29 @@ export default function DashboardPage() {
 
           {/* CARD 2 (RIGHT): ALERT CENTER & QUICK ACTION PASTEL BUTTONS */}
           <div className="bg-white rounded-xl border border-slate-200/90 shadow-sm p-3 flex flex-col justify-between hover:shadow-md transition-all">
-            <div className="flex items-center justify-between pb-2.5 border-b border-slate-100">
-              <div className="flex items-center gap-3">
-                <div className="w-7 h-7 rounded-lg bg-amber-50 border border-amber-200/60 flex items-center justify-center text-amber-600">
-                  <Activity className="w-5 h-5" />
+            <div className="pb-2.5 border-b border-slate-100 space-y-2">
+              <div className="flex items-center justify-between gap-2 min-w-0">
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className="w-7 h-7 rounded-lg bg-amber-50 border border-amber-200/60 flex items-center justify-center text-amber-600 shrink-0">
+                    <Activity className="w-5 h-5" />
+                  </div>
+                  <div className="min-w-0">
+                    <h3 className="text-sm font-black text-slate-900 tracking-tight truncate">
+                      Alert Center & Quick Actions
+                    </h3>
+                    <p className="text-xs text-slate-500 font-medium truncate">Operational priorities & 1-click counter management</p>
+                  </div>
                 </div>
-                <div>
-                  <h3 className="text-sm font-black text-slate-900 tracking-tight">
-                    Alert Center & Quick Actions
-                  </h3>
-                  <p className="text-xs text-slate-500 font-medium">Operational priorities & 1-click counter management</p>
-                </div>
+                <span className="text-xs font-bold text-slate-700 bg-slate-100 px-2.5 py-1 rounded-full border border-slate-200 shrink-0 whitespace-nowrap">
+                  Live Store
+                </span>
               </div>
-              <span className="text-xs font-bold text-slate-700 bg-slate-100 px-2.5 py-1 rounded-full border border-slate-200">
-                Live Store
-              </span>
+              <DateRangeFilter
+                value={dateFilter}
+                onChange={handleUniversalFilterChange}
+                placeholder="All Dates"
+                className="w-full h-8 text-xs font-semibold"
+              />
             </div>
 
             {/* ALERTS LIST */}
@@ -1936,8 +2036,7 @@ export default function DashboardPage() {
               </div>
             </div>
           </div>
-          </div>
-        </div>
+        </MasonryGrid>
 
         {/* ═══════════════════════════════════════════════════════════════════════════════
             🤝 VENDOR & SUPPLIER LEDGER SUMMARY
@@ -1964,12 +2063,20 @@ export default function DashboardPage() {
                 </p>
               </div>
             </div>
-            <Link
-              href="/vendors/ledger"
-              className="text-xs font-bold text-indigo-600 hover:text-indigo-700 hover:bg-indigo-50 h-8 px-3 rounded-md inline-flex items-center"
-            >
-              Open Ledgers →
-            </Link>
+            <div className="flex items-center gap-2">
+              <DateRangeFilter
+                value={dateFilter}
+                onChange={handleUniversalFilterChange}
+                placeholder="All Dates"
+                className="w-[135px] h-8 text-xs font-semibold"
+              />
+              <Link
+                href="/vendors/ledger"
+                className="text-xs font-bold text-indigo-600 hover:text-indigo-700 hover:bg-indigo-50 h-8 px-3 rounded-md inline-flex items-center shrink-0"
+              >
+                Open Ledgers →
+              </Link>
+            </div>
           </div>
 
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-2 pt-3.5">
@@ -2087,12 +2194,9 @@ export default function DashboardPage() {
 
         {/* ═══════════════════════════════════════════════════════════════════════════════
             📊 POOL B: KEY BUSINESS METRICS + EXPENSES + CATEGORY STOCK + SALES STAFF
-            LEADERBOARD + TOP SELLING PRODUCTS — manually balanced (same reasoning as
-            Pool A): [KeyBiz+Expense] | [CategoryStock] | [SalesLeaderboard+TopSelling].
+            LEADERBOARD + TOP SELLING PRODUCTS — real measured masonry (see MasonryGrid).
         ═══════════════════════════════════════════════════════════════════════════════ */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-3 items-start">
-          {/* COLUMN 1: KEY BUSINESS PERFORMANCE + EXPENSE & CASH WITHDRAWAL */}
-          <div className="flex flex-col gap-3">
+        <MasonryGrid>
           <div className="bg-white rounded-xl border border-slate-200/90 shadow-sm p-3 flex flex-col justify-between hover:shadow-md transition-all">
             <div className="flex items-center justify-between pb-2.5 border-b border-slate-100">
               <div className="flex items-center gap-3">
@@ -2505,9 +2609,7 @@ export default function DashboardPage() {
               </span>
             </div>
           </div>
-          </div>
 
-          {/* COLUMN 2: CATEGORY STOCK & WARRANTY OVERVIEW */}
           <div className="bg-white rounded-xl border border-slate-200/90 shadow-sm p-3 flex flex-col justify-between hover:shadow-md transition-all">
             <div className="flex items-center justify-between pb-2.5 border-b border-slate-100">
               <div className="flex items-center gap-3">
@@ -2535,7 +2637,13 @@ export default function DashboardPage() {
               </Button>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 py-3">
+            {/* Always 1 column, not 3 — `sm:` reacts to viewport width, but this
+                card now lives in a masonry column whose actual width varies
+                (often much narrower than a plain 50%-width row), so a fixed
+                3-across layout squeezed the icon/label/badge in each tile
+                into overlapping each other. Stacked tiles always have the
+                card's full width to work with, regardless of column width. */}
+            <div className="grid grid-cols-1 gap-2.5 py-3">
               {/* ELECTRONICS STOCK — umbrella group (fridge, cooler, AC, TV, appliances…) */}
               <div
                 onClick={() => { setStockGroupFilter("electronics"); setStockCategoryFilter("all"); setOpenStockModal(true); }}
@@ -2700,8 +2808,6 @@ export default function DashboardPage() {
             </div>
           </div>
 
-          {/* COLUMN 3: SALES STAFF LEADERBOARD + TOP SELLING PRODUCTS */}
-          <div className="flex flex-col gap-3">
           <div className="bg-white rounded-xl border border-slate-200/90 shadow-sm p-3 flex flex-col justify-between hover:shadow-md transition-all">
             <div className="flex items-center justify-between pb-2.5 border-b border-slate-100">
               <div className="flex items-center gap-3">
@@ -2770,8 +2876,15 @@ export default function DashboardPage() {
             </div>
           </div>
 
-          {/* TOP SELLING PRODUCTS header — stacked in this same column, right above the two product cards below it. */}
-          <div className="flex flex-wrap items-center justify-between gap-2 px-1">
+          {/* TOP SELLING PRODUCTS — header and its two data cards are one atomic
+              masonry item, not three separate ones. Three separate top-level
+              children let the height-based balancer split them across
+              different columns, so the header could render in one column
+              while its own Mobiles/Electronics cards rendered in another —
+              the heading-detached-from-its-data bug. Wrapping them in a
+              single outer card guarantees they always move together. */}
+          <div className="bg-white rounded-xl border border-slate-200/90 shadow-sm p-3 flex flex-col hover:shadow-md transition-all">
+          <div className="flex flex-wrap items-center justify-between gap-2 pb-2.5 border-b border-slate-100">
             <div className="flex items-center gap-2">
               <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-[#3F63AD] to-purple-600 flex items-center justify-center text-white shadow-xs">
                 <Crown className="w-4 h-4 text-amber-300" />
@@ -2835,6 +2948,7 @@ export default function DashboardPage() {
             </div>
           </div>
 
+          <div className={cn("grid gap-3 pt-3", topSellingCategoryTab === "all" ? "grid-cols-1 sm:grid-cols-2" : "grid-cols-1")}>
             {/* 📱 CARD 1: TOP SELLING MOBILES (COMPACT) */}
             {(topSellingCategoryTab === "all" || topSellingCategoryTab === "mobiles") && (() => {
               const mobilesList: any[] = (widgetData.products?.topMobiles ?? data?.topMobiles ?? []).slice(0, 4);
@@ -2843,7 +2957,7 @@ export default function DashboardPage() {
               const totalMobileUnits = mobilesList.reduce((sum, m) => sum + (m.sales || 0), 0);
 
               return (
-                <div className="bg-white rounded-xl border border-slate-200/90 shadow-sm p-3 flex flex-col justify-between hover:shadow-md transition-all">
+                <div className="bg-slate-50/60 rounded-xl border border-slate-200/80 p-3 flex flex-col justify-between">
                   <div>
                     <div className="flex items-center justify-between pb-2.5 border-b border-slate-100">
                       <div className="flex items-center gap-2">
@@ -2948,7 +3062,7 @@ export default function DashboardPage() {
               const totalElecUnits = electronicsList.reduce((sum, e) => sum + (e.sales || 0), 0);
 
               return (
-                <div className="bg-white rounded-xl border border-slate-200/90 shadow-sm p-3 flex flex-col justify-between hover:shadow-md transition-all">
+                <div className="bg-slate-50/60 rounded-xl border border-slate-200/80 p-3 flex flex-col justify-between">
                   <div>
                     <div className="flex items-center justify-between pb-2.5 border-b border-slate-100">
                       <div className="flex items-center gap-2">
@@ -3045,48 +3159,63 @@ export default function DashboardPage() {
               );
             })()}
           </div>
-        </div>
+          </div>
+        </MasonryGrid>
 
         {/* ═══════════════════════════════════════════════════════════════════════════════
             📋 POOL C: DETAILED PAYMENT LOG + RECENT INVOICES + TASK DELEGATION + LEAD
-            PIPELINE — manually balanced: [PaymentLog+RecentInvoices] | [TaskDelegation]
-            | [LeadPipeline].
+            PIPELINE — a plain 4-across CSS grid, not JS masonry. These 4 cards vary
+            noticeably in natural height (Payment Log/Recent Invoices are hard-capped
+            to 5 rows; Task Delegation/Lead Pipeline show as many as are filtered in).
+            `items-stretch` + `h-full` was tried to force all 4 to match the tallest —
+            it does keep the row flush, but on cards with much less content it just
+            moves the dead space from "below the card" to "inside the card, between
+            the list and the footer" via the flex `justify-between`, which is no
+            better. `items-start` (the grid default) instead lets every card end at
+            its own natural height — no card is ever padded out with empty room, at
+            the cost of the row's cards not sharing one bottom edge.
         ═══════════════════════════════════════════════════════════════════════════════ */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-3 items-start">
-          {/* COLUMN 1: DETAILED PAYMENT LOG + RECENT INVOICES & BILLS */}
-          <div className="flex flex-col gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3 items-start">
           <div className="bg-white rounded-xl border border-slate-200/90 shadow-sm p-3 flex flex-col justify-between hover:shadow-md transition-all">
-            <div className="flex items-center justify-between pb-2.5 border-b border-slate-100">
-              <div className="flex items-center gap-3">
-                <div className="w-7 h-7 rounded-lg bg-emerald-50 border border-emerald-200/60 flex items-center justify-center text-emerald-700">
+            <div className="pb-2.5 border-b border-slate-100 space-y-2">
+              <div className="flex items-center gap-3 min-w-0">
+                <div className="w-7 h-7 rounded-lg bg-emerald-50 border border-emerald-200/60 flex items-center justify-center text-emerald-700 shrink-0">
                   <Receipt className="w-5 h-5" />
                 </div>
-                <div>
-                  <h3 className="text-sm font-black text-slate-900 tracking-tight">Detailed Payment Log</h3>
-                  <p className="text-xs text-slate-500 font-medium">Real-time live stream of all received transactions</p>
+                <div className="min-w-0">
+                  <h3 className="text-sm font-black text-slate-900 tracking-tight truncate">Detailed Payment Log</h3>
+                  <p className="text-xs text-slate-500 font-medium truncate">Real-time live stream of all received transactions</p>
                 </div>
               </div>
               <div className="flex items-center gap-2">
-                <DateRangeFilter 
-                  value={widgetFilters.logs} 
+                <DateRangeFilter
+                  value={widgetFilters.logs}
                   onChange={(val, start, end) => handleWidgetFilterChange('logs', val, start, end)}
-                  className="w-[110px] h-8 text-xs font-semibold"
+                  className="flex-1 min-w-0 h-8 text-xs font-semibold"
                 />
-                <Button size="sm" variant="outline" className="text-xs h-8 px-2.5 font-bold" onClick={() => router.push(`/dashboard/reports?type=all&dateFilter=${widgetFilters.logs}`)}>
+                <Button size="sm" variant="outline" className="text-xs h-8 px-2.5 font-bold shrink-0" onClick={() => router.push(`/dashboard/reports?type=all&dateFilter=${widgetFilters.logs}`)}>
                   <Eye className="w-3.5 h-3.5 mr-1" /> All
                 </Button>
               </div>
             </div>
 
-            <div className="p-0 max-h-[310px] overflow-y-auto my-2.5">
+            {/* No max-h/scroll here — this list is hard-capped to 5 rows via
+                `.slice(0, 5)` below, so it never needs to scroll. A fixed
+                max-height tall enough for a scrollbar just reserved blank
+                space under a shorter list. */}
+            <div className="p-0 my-2.5">
               <table className="w-full text-xs sm:text-sm text-left table-fixed">
-                <thead className="bg-slate-50 text-slate-500 font-bold text-[10px] uppercase tracking-wider border-b border-slate-200 sticky top-0 z-10">
+                <thead className="bg-slate-50 text-slate-500 font-bold text-[10px] uppercase tracking-wider border-b border-slate-200">
                   <tr>
-                    <th className="px-2.5 py-2.5 w-[22%]">Time</th>
-                    <th className="px-2.5 py-2.5 w-[28%]">Invoice #</th>
-                    <th className="px-2.5 py-2.5 w-[20%] text-center">Mode</th>
-                    <th className="px-2.5 py-2.5 w-[20%] text-right">Amount</th>
-                    <th className="px-1.5 py-2.5 w-[10%] text-center"></th>
+                    {/* Action column widened to fit both icon buttons — at
+                        narrow (single-column, mobile) widths the old 10%
+                        wasn't enough room for two 24px buttons, so they spilled
+                        left on top of the Amount column's digits. */}
+                    <th className="px-2 py-2.5 w-[16%]">Time</th>
+                    <th className="px-2 py-2.5 w-[21%]">Invoice #</th>
+                    <th className="px-2 py-2.5 w-[18%] text-center">Mode</th>
+                    <th className="px-2 py-2.5 w-[25%] text-right">Amount</th>
+                    <th className="px-1.5 py-2.5 w-[20%] text-center"></th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
@@ -3172,62 +3301,65 @@ export default function DashboardPage() {
 
           {/* CARD 2 (RIGHT): TODAY'S SALES REPORT / RECENT INVOICES */}
           <div className="bg-white rounded-xl border border-slate-200/90 shadow-sm p-3 flex flex-col justify-between hover:shadow-md transition-all">
-            <div className="flex items-center justify-between pb-2.5 border-b border-slate-100">
-              <div className="flex items-center gap-3">
-                <div className="w-7 h-7 rounded-lg bg-blue-50 border border-blue-200/60 flex items-center justify-center text-[#3F63AD]">
+            <div className="pb-2.5 border-b border-slate-100 space-y-2">
+              <div className="flex items-center gap-3 min-w-0">
+                <div className="w-7 h-7 rounded-lg bg-blue-50 border border-blue-200/60 flex items-center justify-center text-[#3F63AD] shrink-0">
                   <FileText className="w-5 h-5" />
                 </div>
-                <div>
-                  <h3 className="text-sm font-black text-slate-900 tracking-tight">Recent Invoices & Bills</h3>
-                  <p className="text-xs text-slate-500 font-medium">1-click official GST tax invoice print and status overview</p>
+                <div className="min-w-0">
+                  <h3 className="text-sm font-black text-slate-900 tracking-tight truncate">Recent Invoices & Bills</h3>
+                  <p className="text-xs text-slate-500 font-medium truncate">1-click official GST tax invoice print and status overview</p>
                 </div>
               </div>
               <div className="flex items-center gap-2">
-                <DateRangeFilter 
-                  value={widgetFilters.recent} 
+                <DateRangeFilter
+                  value={widgetFilters.recent}
                   onChange={(val, start, end) => handleWidgetFilterChange('recent', val, start, end)}
-                  className="w-[110px] h-8 text-xs font-semibold"
+                  className="flex-1 min-w-0 h-8 text-xs font-semibold"
                 />
-                <Button 
-                  size="sm" 
-                  onClick={handleOpenInvoiceModal} 
-                  className="bg-[#76C043] hover:bg-[#60a82c] text-white border-none text-xs h-8 px-3 rounded-lg font-bold"
+                <Button
+                  size="sm"
+                  onClick={handleOpenInvoiceModal}
+                  className="bg-[#76C043] hover:bg-[#60a82c] text-white border-none text-xs h-8 px-3 rounded-lg font-bold shrink-0"
                 >
                   + New Bill
                 </Button>
               </div>
             </div>
 
-            <div className="divide-y divide-slate-100 max-h-[310px] overflow-y-auto my-2.5">
+            {/* No max-h/scroll — hard-capped to 5 rows via `.slice(0, 5)`
+                below, same as Detailed Payment Log, so a fixed scroll height
+                just reserved blank space under a shorter list. */}
+            <div className="divide-y divide-slate-100 my-2.5">
               {(widgetData.recent?.recentInvoices || []).slice(0, 5).map((inv: any) => (
                 <div
                   key={inv._id || inv.invoiceNumber}
                   onClick={() => handlePrintTrigger(inv)}
-                  className="flex items-center justify-between p-2.5 hover:bg-slate-50 rounded-xl transition-colors cursor-pointer group"
+                  className="flex items-center justify-between gap-2 p-2 hover:bg-slate-50 rounded-xl transition-colors cursor-pointer group"
                 >
-                  <div className="flex items-center gap-3">
-                    <div className="w-7 h-7 rounded-lg bg-[#3F63AD]/10 flex items-center justify-center text-[#3F63AD] group-hover:bg-[#3F63AD] group-hover:text-white transition-colors">
-                      <Printer className="w-5 h-5" />
+                  <div className="flex items-center gap-2 min-w-0">
+                    <div className="w-6 h-6 rounded-lg bg-[#3F63AD]/10 flex items-center justify-center text-[#3F63AD] group-hover:bg-[#3F63AD] group-hover:text-white transition-colors shrink-0">
+                      <Printer className="w-3.5 h-3.5" />
                     </div>
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <p className="text-xs sm:text-sm font-bold text-slate-900 group-hover:text-[#3F63AD] transition-colors">{inv.invoiceNumber}</p>
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-1.5">
+                        <p className="text-xs font-bold text-slate-900 group-hover:text-[#3F63AD] transition-colors truncate">{inv.invoiceNumber}</p>
                         {(inv.reprintCount || 0) > 0 && (
-                          <span className="font-mono text-[9px] font-bold px-1.5 py-0.5 rounded bg-amber-50 text-amber-800 border border-amber-300">
+                          <span className="font-mono text-[9px] font-bold px-1 py-0.5 rounded bg-amber-50 text-amber-800 border border-amber-300 shrink-0">
                             🖨️ {inv.reprintCount}x
                           </span>
                         )}
                       </div>
-                      <p className="text-xs text-slate-400 truncate max-w-[150px]">{inv.customerName} · {inv.date}</p>
+                      <p className="text-[11px] text-slate-400 truncate">{inv.customerName} · {inv.date}</p>
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-3">
+                  <div className="flex items-center gap-1.5 shrink-0">
                     <div className="text-right">
-                      <p className="text-xs sm:text-sm font-black text-slate-900 font-mono">{formatCurrency(inv.total)}</p>
-                      <p className="text-[10px] text-slate-400 font-semibold">{inv.paymentMode || "Cash"}</p>
+                      <p className="text-xs font-black text-slate-900 font-mono">{formatCurrency(inv.total)}</p>
+                      <p className="text-[9px] text-slate-400 font-semibold">{inv.paymentMode || "Cash"}</p>
                     </div>
-                    <StatusBadge status={inv.status} />
+                    <StatusBadge status={inv.status} className="text-[10px] px-1.5 py-0.5 whitespace-nowrap" />
                     <Button
                       size="sm"
                       variant="outline"
@@ -3235,7 +3367,7 @@ export default function DashboardPage() {
                         e.stopPropagation();
                         handlePrintTrigger(inv);
                       }}
-                      className="h-7 px-2.5 text-xs font-bold border-[#3F63AD] text-[#3F63AD] hover:bg-[#3F63AD] hover:text-white"
+                      className="h-6 px-1.5 text-[10px] font-bold border-[#3F63AD] text-[#3F63AD] hover:bg-[#3F63AD] hover:text-white"
                     >
                       Print
                     </Button>
@@ -3249,32 +3381,39 @@ export default function DashboardPage() {
               <span className="font-bold text-slate-700">Value Plus Format</span>
             </div>
           </div>
-          </div>
 
-          {/* COLUMN 2: ADMIN & STAFF TASK DELEGATION */}
           <div className="bg-white rounded-xl border border-slate-200/90 shadow-sm p-3 flex flex-col justify-between hover:shadow-md transition-all">
             <div>
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-2.5 border-b border-slate-100 gap-3">
-                <div className="flex items-center gap-3">
-                  <div className="w-7 h-7 rounded-lg bg-purple-50 border border-purple-200/60 flex items-center justify-center text-purple-700">
+              <div className="pb-2.5 border-b border-slate-100 space-y-2">
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className="w-7 h-7 rounded-lg bg-purple-50 border border-purple-200/60 flex items-center justify-center text-purple-700 shrink-0">
                     <CheckSquare className="w-5 h-5" />
                   </div>
-                  <div>
-                    <h3 className="text-sm font-black text-slate-900 tracking-tight flex items-center gap-2">
-                      Task Delegation & Operations
-                      <Badge className="bg-purple-50 text-purple-800 border-purple-200 text-xs font-bold px-2 py-0.5">
+                  <div className="min-w-0">
+                    <h3 className="text-sm font-black text-slate-900 tracking-tight flex items-center gap-2 min-w-0">
+                      <span className="truncate">Task Delegation & Operations</span>
+                      <Badge className="bg-purple-50 text-purple-800 border-purple-200 text-xs font-bold px-2 py-0.5 shrink-0">
                         {tasks.filter(t => t.status !== "Completed").length} Active
                       </Badge>
                     </h3>
-                    <p className="text-xs text-slate-500 font-medium">Admin self-tasks & sales executive team assignments</p>
+                    <p className="text-xs text-slate-500 font-medium truncate">Admin self-tasks & sales executive team assignments</p>
                   </div>
                 </div>
 
                 <div className="flex items-center gap-2">
-                  <Button 
-                    size="sm" 
+                  <DateRangeFilter
+                    value={taskDateFilter}
+                    onChange={(val, start, end) => {
+                      setTaskDateFilter(val);
+                      setTaskDateRange({ start: start || "", end: end || "" });
+                    }}
+                    placeholder="All Dates"
+                    className="flex-1 min-w-0 h-8 text-xs font-semibold"
+                  />
+                  <Button
+                    size="sm"
                     onClick={() => setIsNewTaskModalOpen(true)}
-                    className="bg-[#30539C] hover:bg-[#1E3A8A] text-white border-none text-xs h-8 px-3 rounded-lg font-bold shadow-sm"
+                    className="bg-[#30539C] hover:bg-[#1E3A8A] text-white border-none text-xs h-8 px-3 rounded-lg font-bold shadow-sm shrink-0"
                   >
                     <Plus className="w-3.5 h-3.5 mr-1" /> Assign Task
                   </Button>
@@ -3308,7 +3447,9 @@ export default function DashboardPage() {
               {/* TASK LIST */}
               <div className="divide-y divide-slate-100 max-h-[300px] overflow-y-auto my-2 space-y-1">
                 {(() => {
+                  const isTaskDateFilterActive = Boolean(taskDateFilter && taskDateRange.start && taskDateRange.end);
                   const filtered = tasks.filter(t => {
+                    if (isTaskDateFilterActive && !isDateInRange(t.dueDate, taskDateRange.start, taskDateRange.end)) return false;
                     if (taskTabFilter === "admin") return t.assignedStaff?.includes("Admin") || t.assignedStaff?.includes("Self");
                     if (taskTabFilter === "staff") return !t.assignedStaff?.includes("Admin") && !t.assignedStaff?.includes("Self");
                     if (taskTabFilter === "pending") return t.status !== "Completed";
@@ -3426,27 +3567,36 @@ export default function DashboardPage() {
           {/* COLUMN 3: LEAD PIPELINE & CONVERSION FUNNEL */}
           <div className="bg-white rounded-xl border border-slate-200/90 shadow-sm p-3 flex flex-col justify-between hover:shadow-md transition-all">
             <div>
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-2.5 border-b border-slate-100 gap-3">
-                <div className="flex items-center gap-3">
-                  <div className="w-7 h-7 rounded-lg bg-amber-50 border border-amber-200/60 flex items-center justify-center text-amber-700">
+              <div className="pb-2.5 border-b border-slate-100 space-y-2">
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className="w-7 h-7 rounded-lg bg-amber-50 border border-amber-200/60 flex items-center justify-center text-amber-700 shrink-0">
                     <Target className="w-5 h-5" />
                   </div>
-                  <div>
-                    <h3 className="text-sm font-black text-slate-900 tracking-tight flex items-center gap-2">
-                      Lead Pipeline & Conversion
-                      <Badge className="bg-emerald-50 text-emerald-800 border-emerald-200 text-xs font-bold px-2 py-0.5">
+                  <div className="min-w-0">
+                    <h3 className="text-sm font-black text-slate-900 tracking-tight flex items-center gap-2 min-w-0">
+                      <span className="truncate">Lead Pipeline & Conversion</span>
+                      <Badge className="bg-emerald-50 text-emerald-800 border-emerald-200 text-xs font-bold px-2 py-0.5 shrink-0">
                         {leads.filter(l => l.status === "Converted").length} Converted
                       </Badge>
                     </h3>
-                    <p className="text-xs text-slate-500 font-medium">Enquiries, follow-up scheduler & counter conversion rate</p>
+                    <p className="text-xs text-slate-500 font-medium truncate">Enquiries, follow-up scheduler & counter conversion rate</p>
                   </div>
                 </div>
 
                 <div className="flex items-center gap-2">
-                  <Button 
-                    size="sm" 
+                  <DateRangeFilter
+                    value={leadDateFilter}
+                    onChange={(val, start, end) => {
+                      setLeadDateFilter(val);
+                      setLeadDateRange({ start: start || "", end: end || "" });
+                    }}
+                    placeholder="All Dates"
+                    className="flex-1 min-w-0 h-8 text-xs font-semibold"
+                  />
+                  <Button
+                    size="sm"
                     onClick={() => setIsNewLeadModalOpen(true)}
-                    className="bg-[#76C043] hover:bg-[#60a82c] text-white border-none text-xs h-8 px-3 rounded-lg font-bold shadow-sm"
+                    className="bg-[#76C043] hover:bg-[#60a82c] text-white border-none text-xs h-8 px-3 rounded-lg font-bold shadow-sm shrink-0"
                   >
                     <Plus className="w-3.5 h-3.5 mr-1" /> New Lead
                   </Button>
@@ -3454,15 +3604,24 @@ export default function DashboardPage() {
               </div>
 
               {/* FUNNEL SUMMARY METRICS STRIP */}
+              {/* Always 2 columns, not 4 — this card now sits in a 4-across grid,
+                  so its own width is roughly a quarter of the viewport. Cramming
+                  4 sub-tiles into that would repeat the same overlap bug fixed
+                  on Payment Leakage and Category Stock; a 2x2 layout always has
+                  enough width per tile. */}
               {(() => {
-                const totalLeads = leads.length;
-                const converted = leads.filter(l => l.status === "Converted").length;
-                const followups = leads.filter(l => l.status === "Follow-up" || l.status === "Interested" || l.status === "Contacted").length;
+                const isLeadDateFilterActive = Boolean(leadDateFilter && leadDateRange.start && leadDateRange.end);
+                const scopedLeads = isLeadDateFilterActive
+                  ? leads.filter(l => isDateInRange(l.followUpDate, leadDateRange.start, leadDateRange.end))
+                  : leads;
+                const totalLeads = scopedLeads.length;
+                const converted = scopedLeads.filter(l => l.status === "Converted").length;
+                const followups = scopedLeads.filter(l => l.status === "Follow-up" || l.status === "Interested" || l.status === "Contacted").length;
                 const convRate = totalLeads > 0 ? Math.round((converted / totalLeads) * 100) : 0;
-                const pipelineVal = leads.reduce((acc, l) => acc + (Number(l.estimatedValue) || 0), 0);
+                const pipelineVal = scopedLeads.reduce((acc, l) => acc + (Number(l.estimatedValue) || 0), 0);
 
                 return (
-                  <div className="grid grid-cols-4 gap-2 my-2.5">
+                  <div className="grid grid-cols-2 gap-2 my-2.5">
                     <div className="bg-blue-50/60 border border-blue-100 rounded-xl p-2 text-center">
                       <p className="text-[10px] font-bold text-blue-700 uppercase">Total Leads</p>
                       <p className="text-sm sm:text-sm font-black text-slate-900 font-mono">{totalLeads}</p>
@@ -3488,32 +3647,43 @@ export default function DashboardPage() {
               })()}
 
               {/* QUICK FILTER TABS */}
-              <div className="flex items-center gap-1.5 py-1.5 overflow-x-auto border-b border-slate-100">
-                {[
-                  { key: "all", label: `All (${leads.length})` },
-                  { key: "new", label: `🎯 New (${leads.filter(l => l.status === "New").length})` },
-                  { key: "followup", label: `⏳ Follow-up (${leads.filter(l => l.status === "Follow-up" || l.status === "Interested" || l.status === "Contacted").length})` },
-                  { key: "converted", label: `🏆 Converted (${leads.filter(l => l.status === "Converted").length})` },
-                ].map(tab => (
-                  <button
-                    key={tab.key}
-                    onClick={() => setLeadTabFilter(tab.key as any)}
-                    className={cn(
-                      "px-2.5 py-0.5 rounded-lg text-xs font-bold whitespace-nowrap transition-all",
-                      leadTabFilter === tab.key
-                        ? "bg-slate-900 text-white shadow-sm"
-                        : "bg-slate-100 text-slate-600 hover:bg-slate-200"
-                    )}
-                  >
-                    {tab.label}
-                  </button>
-                ))}
-              </div>
+              {(() => {
+                const isLeadDateFilterActive = Boolean(leadDateFilter && leadDateRange.start && leadDateRange.end);
+                const dateScopedLeads = isLeadDateFilterActive
+                  ? leads.filter(l => isDateInRange(l.followUpDate, leadDateRange.start, leadDateRange.end))
+                  : leads;
+
+                return (
+                  <div className="flex items-center gap-1.5 py-1.5 overflow-x-auto border-b border-slate-100">
+                    {[
+                      { key: "all", label: `All (${dateScopedLeads.length})` },
+                      { key: "new", label: `🎯 New (${dateScopedLeads.filter(l => l.status === "New").length})` },
+                      { key: "followup", label: `⏳ Follow-up (${dateScopedLeads.filter(l => l.status === "Follow-up" || l.status === "Interested" || l.status === "Contacted").length})` },
+                      { key: "converted", label: `🏆 Converted (${dateScopedLeads.filter(l => l.status === "Converted").length})` },
+                    ].map(tab => (
+                      <button
+                        key={tab.key}
+                        onClick={() => setLeadTabFilter(tab.key as any)}
+                        className={cn(
+                          "px-2.5 py-0.5 rounded-lg text-xs font-bold whitespace-nowrap transition-all",
+                          leadTabFilter === tab.key
+                            ? "bg-slate-900 text-white shadow-sm"
+                            : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+                        )}
+                      >
+                        {tab.label}
+                      </button>
+                    ))}
+                  </div>
+                );
+              })()}
 
               {/* LEADS STREAM */}
               <div className="divide-y divide-slate-100 max-h-[225px] overflow-y-auto my-1.5 space-y-1">
                 {(() => {
+                  const isLeadDateFilterActive = Boolean(leadDateFilter && leadDateRange.start && leadDateRange.end);
                   const filtered = leads.filter(l => {
+                    if (isLeadDateFilterActive && !isDateInRange(l.followUpDate, leadDateRange.start, leadDateRange.end)) return false;
                     if (leadTabFilter === "new") return l.status === "New";
                     if (leadTabFilter === "followup") return l.status === "Follow-up" || l.status === "Interested" || l.status === "Contacted";
                     if (leadTabFilter === "converted") return l.status === "Converted";
