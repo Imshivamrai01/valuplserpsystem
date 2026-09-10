@@ -295,18 +295,23 @@ export async function POST(req: Request) {
               startObj.setMonth(startObj.getMonth() + duration);
               const endDate = startObj.toISOString().split("T")[0];
 
+              // Field names here must match models/ExtendedWarranty.ts exactly —
+              // this used to write policyNumber/invoiceId/customerId/itemName/
+              // provider, none of which exist on that schema (it wants
+              // warrantyId/productName/vpCode instead), so every one of these
+              // .create() calls failed validation and the invoice save silently
+              // ended up warranty-less.
               const warrantyCount = await ExtendedWarranty.countDocuments();
+              const warrantyId = `EW-2026-${String(warrantyCount + 1).padStart(4, "0")}-${Math.floor(1000 + Math.random() * 9000)}`;
               await ExtendedWarranty.create({
-                policyNumber: item.extendedWarrantyPolicyNo || `EW-2026-${String(warrantyCount + 1).padStart(4, "0")}`,
-                invoiceId: invoice._id.toString(),
+                warrantyId,
                 invoiceNumber: invoice.invoiceNumber,
-                customerId: invoice.customerId,
                 customerName: invoice.customerName,
                 customerPhone: invoice.customerPhone || "",
                 itemId: item.itemId,
-                itemName: item.itemName,
+                productName: item.itemName,
+                vpCode: item.vpCode || item.itemCode || "",
                 serialNumber: item.serialNumber || "",
-                provider: item.extendedWarrantyProvider || "OneAssist",
                 planName: item.extendedWarrantyPlan,
                 durationMonths: duration,
                 startDate,
@@ -314,6 +319,9 @@ export async function POST(req: Request) {
                 warrantyAmount: item.extendedWarrantyAmount,
                 salesStaff: invoice.salesExecutive || "Amit Singh",
                 status: "Active",
+                remarks: item.extendedWarrantyPolicyNo
+                  ? `Provider policy #: ${item.extendedWarrantyPolicyNo}`
+                  : "",
               });
             }
           }
