@@ -1,23 +1,14 @@
+// Must come before the `pdf-parse` import below — this registers pdf-parse's
+// own worker/canvas setup that its underlying pdfjs-dist engine needs. Without
+// it, pdfjs-dist reaches for the browser's DOMMatrix/DOMPoint/DOMRect globals
+// for its text-transform math and there's nothing in Node to answer ("DOMMatrix
+// is not defined"). This is pdf-parse's own documented fix for Node/serverless
+// use, not a hand-rolled polyfill — see its Next.js/Vercel troubleshooting
+// guide. `next.config.mjs`'s `serverExternalPackages` must also list
+// "@napi-rs/canvas" alongside "pdf-parse", or webpack bundling this package
+// for the server route can still leave CanvasFactory unable to resolve it.
+import { CanvasFactory } from "pdf-parse/worker";
 import { PDFParse } from "pdf-parse";
-
-/**
- * pdf-parse's underlying pdfjs-dist engine expects the browser's DOMMatrix /
- * DOMPoint / DOMRect globals for its text-transform math ("DOMMatrix is not
- * defined" otherwise). Node has none of these, and pdf-parse's own native
- * canvas dependency (@napi-rs/canvas) isn't guaranteed to load its
- * platform-specific binary in every serverless environment — but that same
- * package ships a pure-JS geometry polyfill with no native binding, which is
- * all pdfjs-dist actually needs here, so it's wired up on demand instead.
- */
-async function ensurePdfjsDomPolyfills(): Promise<void> {
-  const g = globalThis as any;
-  if (typeof g.DOMMatrix !== "undefined") return;
-  // @ts-ignore -- no type declarations ship for this internal subpath
-  const geometry: any = await import("@napi-rs/canvas/geometry.js");
-  g.DOMMatrix = geometry.DOMMatrix;
-  g.DOMPoint = geometry.DOMPoint;
-  g.DOMRect = geometry.DOMRect;
-}
 
 /**
  * Break one extracted text line into cells resolveRows() can read as
@@ -70,8 +61,7 @@ function splitPdfTextLine(line: string): string[] {
 export async function extractRowsFromPdf(
   buffer: Buffer
 ): Promise<{ grid: string[][]; usedTableExtraction: boolean; rawText: string }> {
-  await ensurePdfjsDomPolyfills();
-  const parser = new PDFParse({ data: buffer });
+  const parser = new PDFParse({ data: buffer, CanvasFactory });
 
   try {
     // A real table structure, when pdf-parse can find one, is far more

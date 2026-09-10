@@ -16,7 +16,11 @@ const nextConfig = {
   // route (`Object.defineProperty called on non-object` at import time) —
   // this tells Next to `require()` it directly at runtime instead of bundling
   // it, which is the documented fix for packages that don't survive bundling.
-  serverExternalPackages: ["pdf-parse"],
+  // @napi-rs/canvas (pdf-parse's CanvasFactory, see lib/purchase-import/pdf.ts)
+  // needs the same treatment — bundled, it can end up unable to resolve at
+  // runtime and pdfjs-dist falls back to browser DOM globals Node doesn't have
+  // ("DOMMatrix is not defined").
+  serverExternalPackages: ["pdf-parse", "@napi-rs/canvas"],
   eslint: {
     ignoreDuringBuilds: true,
   },
